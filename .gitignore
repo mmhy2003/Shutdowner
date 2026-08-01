@@ -1,0 +1,5 @@
+.env
+.env.dev
+dist/
+*.log
+*.log.[0-9]
