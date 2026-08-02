@@ -3,6 +3,8 @@ package web
 
 import (
 	"errors"
+	"fmt"
+	"html/template"
 	"log/slog"
 	"net/http"
 
@@ -29,6 +31,7 @@ type Server struct {
 	actions      *action.Manager
 	power        power.Controller
 	logger       *slog.Logger
+	tmpl         *template.Template
 	passwordHash string
 	delaySeconds int
 }
@@ -40,20 +43,28 @@ func New(o Options) (*Server, error) {
 	if o.PasswordHash == "" {
 		return nil, errors.New("web: PasswordHash is required")
 	}
+	tmpl, err := parseTemplates()
+	if err != nil {
+		return nil, fmt.Errorf("web: parsing templates: %w", err)
+	}
 	return &Server{
 		sessions:     o.Sessions,
 		limiter:      o.Limiter,
 		actions:      o.Actions,
 		power:        o.Power,
 		logger:       o.Logger,
+		tmpl:         tmpl,
 		passwordHash: o.PasswordHash,
 		delaySeconds: o.DelaySeconds,
 	}, nil
 }
 
-// Routes builds the handler tree. Tasks 12, 13 and 14 extend it.
+// Routes builds the handler tree. Tasks 13 and 14 extend it.
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /login", s.handleLoginForm)
+	mux.HandleFunc("POST /login", s.handleLoginSubmit)
+	mux.HandleFunc("POST /logout", s.requireSession(s.requireCSRF(s.handleLogout)))
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	return securityHeaders(recoverPanic(s.logger, mux))
 }
