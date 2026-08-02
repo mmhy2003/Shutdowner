@@ -220,6 +220,13 @@ func (m *Manager) Tick() {
 		return
 	}
 	m.state = StateExecuting
+	// The deadline is spent the moment it is claimed, not when Execute returns.
+	// This must reach disk before the lock is released: for the whole duration
+	// of Execute (which can be the entire length of a suspend, or however long
+	// shutdown.exe takes to run), a StartAutomatic service that restarts would
+	// otherwise still see a pending record on disk and re-arm it, re-executing
+	// an action that already ran or is still running.
+	m.persistLocked()
 	a, force := m.action, m.force
 	m.mu.Unlock()
 
@@ -230,18 +237,24 @@ func (m *Manager) Tick() {
 	if err != nil {
 		m.state = StateFailed
 		m.lastErr = err.Error()
-		m.failedAt = m.now()
-		// The deadline that just fired is spent either way: clearing the record
-		// keeps a restart from re-arming and silently re-running an action an
-		// operator has not confirmed again.
+		// Round(0) strips the monotonic reading: expireFailedLocked compares
+		// this against a fresh m.now(), and a monotonic-vs-monotonic Sub uses
+		// the monotonic clock alone, which stops across a suspend and would
+		// make the failure banner outlive its wall-clock retention.
+		m.failedAt = m.now().Round(0)
+		// Already cleared above when the action was claimed; harmless here.
 		m.persistLocked()
 		return
 	}
 	// Sleep and hibernate reach here only once the machine has resumed, because
-	// SetSuspendState blocks for the whole suspension. Shutdown and restart
-	// never reach here at all: the process dies mid-call.
+	// SetSuspendState blocks for the whole suspension. Shutdown and restart do
+	// reach here too, contrary to what this comment used to claim: shutdown.exe
+	// /t 0 returns immediately and CombinedOutput reaps it well before Windows
+	// actually powers off, so this success branch runs normally for those as
+	// well.
 	m.state = StateIdle
 	m.lastErr = ""
+	// Already cleared above when the action was claimed; harmless here.
 	m.persistLocked()
 }
 
@@ -352,9 +365,30 @@ func (m *Manager) Restore() error {
 	}
 
 	now := m.now()
+
+	// A state file is not trustworthy just because it parsed. Capabilities are
+	// deliberately not re-checked here — those can legitimately change between
+	// runs, and Execute already fails safely if they have — but the action name
+	// and the deadline are structural: an invalid action would fail
+	// unpredictably at fire time instead of at Schedule as usual, and a
+	// deadline further out than MaxHorizon (a hand-edited or corrupted file)
+	// would otherwise be armed and occupy the single schedule slot with
+	// ErrConflict until someone notices and aborts it.
+	if !p.Pending.Action.Valid() || p.Pending.FiresAt.Sub(now) > MaxHorizon {
+		m.missed = nil
+		m.state = StateIdle
+		m.persistLocked()
+		return fmt.Errorf("action: refusing to restore an invalid schedule (action=%q firesAt=%s)",
+			p.Pending.Action, p.Pending.FiresAt.Format(time.RFC3339))
+	}
+
 	if now.Sub(p.Pending.FiresAt) > MissedGrace {
 		m.action = p.Pending.Action
-		m.firesAt = p.Pending.FiresAt
+		// .Local() re-anchors the restored instant to the PC's current zone
+		// rather than the offset it was saved with, so a DST change between
+		// saving and restoring cannot leave WasDueAt (formatted from this
+		// below, in missLocked) showing the wrong hour.
+		m.firesAt = p.Pending.FiresAt.Local()
 		m.missLocked()
 		return nil
 	}
@@ -368,7 +402,13 @@ func (m *Manager) Restore() error {
 	m.id = p.Pending.ID
 	m.action = p.Pending.Action
 	m.force = p.Pending.Force
-	m.firesAt = p.Pending.FiresAt
+	// Same DST reasoning as the missed branch above: FiresAtLocal must reflect
+	// the PC's current offset, not the one in effect when the file was saved.
+	m.firesAt = p.Pending.FiresAt.Local()
+	// The in-memory clear of a stale Missed above must reach disk too, or a
+	// restart before the next Schedule/Abort/Tick would restore the file as it
+	// was and disagree with what Status has been reporting since.
+	m.persistLocked()
 	return nil
 }
 

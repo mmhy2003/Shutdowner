@@ -110,9 +110,14 @@
     // Past a minute the countdown alone stops being useful, so name the hour it
     // lands on. The wall-clock characters are taken from the server's string as
     // text: passing it through Date() would re-read it in the browser's
-    // timezone, which is the one thing the design rules out.
+    // timezone, which is the one thing the design rules out. A schedule can
+    // reach days out, so a bare time is ambiguous the same way the missed
+    // banner's is — only drop the date when it is unmistakably today, compared
+    // as text against the PC's own idea of "today".
     if (left >= 60 && state.pending.firesAtLocal) {
-      text += " · at " + state.pending.firesAtLocal.slice(11, 16);
+      var sameDay = state.localTime && state.localTime.slice(0, 10) === state.pending.firesAtLocal.slice(0, 10);
+      var when = sameDay ? state.pending.firesAtLocal.slice(11, 16) : state.pending.firesAtLocal.slice(0, 16).replace("T", " ");
+      text += " · at " + when;
     }
     el("pending-text").textContent = text;
     if (left === 0) state.firedAction = state.pending.action;
@@ -240,7 +245,12 @@
     }
 
     var pcNow = pcWallDate(state.localTime);
-    at.min = pcWallInput(pcNow);
+    // The picker's granularity is minutes, so its min must be rounded UP to
+    // the next whole minute rather than truncated down to the current one:
+    // the current minute is already partway elapsed, and by the time the
+    // server parses that value back it is in the past, which it rejects.
+    var pcMinMinute = new Date(Math.ceil(pcNow.getTime() / 60000) * 60000);
+    at.min = pcWallInput(pcMinMinute);
     at.max = pcWallInput(new Date(pcNow.getTime() + 7 * 86400000));
     at.value = pcWallInput(new Date(pcNow.getTime() + 3600000));
 
@@ -285,6 +295,26 @@
   }
 
   el("when-in-unit").addEventListener("change", syncWhenInMax);
+
+  // A <label> wrapping the radio and the row's other controls only forwards a
+  // click or keystroke to the radio when the target is the label's own text;
+  // per the HTML spec a label's default activation behaviour does nothing for
+  // events aimed at an interactive descendant. So typing in the number input
+  // or the datetime picker, or opening the unit select, leaves "Now" checked
+  // while the operator believes they picked "In" or "At" — and the action
+  // fires on the short countdown instead of the deferred time they set.
+  // Binding input/focus on each control and checking that row's radio closes
+  // the gap the label's own behaviour leaves open.
+  function checkWhenRow(value) {
+    var radio = document.querySelector('input[name="when"][value="' + value + '"]');
+    if (radio) radio.checked = true;
+  }
+  ["when-in-value", "when-in-unit"].forEach(function (id) {
+    el(id).addEventListener("input", function () { checkWhenRow("in"); });
+    el(id).addEventListener("focus", function () { checkWhenRow("in"); });
+  });
+  el("when-at").addEventListener("input", function () { checkWhenRow("at"); });
+  el("when-at").addEventListener("focus", function () { checkWhenRow("at"); });
 
   var dialog = el("confirm");
   var chosenAction = null;

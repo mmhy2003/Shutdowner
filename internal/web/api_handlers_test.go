@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"shutdowner/internal/power"
 )
@@ -74,6 +75,39 @@ func TestStatusReportsCapabilities(t *testing.T) {
 	}
 	if caps["sleep"] != true || caps["hibernate"] != false {
 		t.Errorf("capabilities = %v, want sleep true and hibernate false", caps)
+	}
+}
+
+// TestStatusReportsAMissedAction pins that a populated Missed record on the
+// manager actually reaches the client: handleStatus hand-copies the field
+// from action.Status rather than deriving it, and nothing previously failed
+// if that copy were ever deleted — on the one feature whose entire purpose is
+// telling the operator the PC did not do what they asked.
+func TestStatusReportsAMissedAction(t *testing.T) {
+	e := newTestEnv(t)
+
+	// Driving the manager into StateMissed directly, rather than through
+	// /api/action, avoids waiting on real time: a deadline already
+	// MissedGrace in the past is missed on the very next Tick.
+	past := time.Now().Add(-time.Hour)
+	if _, err := e.actions.Schedule(context.Background(), power.ActionSleep, false, past); err != nil {
+		t.Fatalf("Schedule() error = %v", err)
+	}
+	e.actions.Tick()
+	if s := e.actions.Status(); s.State != "missed" {
+		t.Fatalf("setup: State = %q, want missed", s.State)
+	}
+
+	_, body := getJSON(t, e, "/api/status")
+	missed, ok := body["missed"].(map[string]any)
+	if !ok {
+		t.Fatalf("missed = %v, want an object", body["missed"])
+	}
+	if missed["action"] != "sleep" {
+		t.Errorf("missed.action = %v, want sleep", missed["action"])
+	}
+	if wasDueAt, ok := missed["wasDueAt"].(string); !ok || wasDueAt == "" {
+		t.Errorf("missed.wasDueAt = %v, want a non-empty string", missed["wasDueAt"])
 	}
 }
 

@@ -629,6 +629,41 @@ func TestFailedExecutionClearsThePersistedSchedule(t *testing.T) {
 	}
 }
 
+// TestClaimingAnActionClearsThePersistedScheduleBeforeItRuns pins the actual
+// consequence of persisting on completion instead of on claim: the service is
+// installed with StartAutomatic, so it returns at boot. If the on-disk record
+// still says "pending" for the whole duration Execute runs, a restart landing
+// in that window — a scheduled RESTART rebooting the machine mid-Execute is
+// exactly such a restart — re-arms the same deadline and fires it again. This
+// schedules an action, fires it against a controller that blocks inside
+// Execute, and asserts that the store no longer holds a pending record while
+// Execute is still running, not only after it returns.
+func TestClaimingAnActionClearsThePersistedScheduleBeforeItRuns(t *testing.T) {
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	ctrl := &blockingController{release: make(chan struct{}), entered: make(chan struct{})}
+	store := &memStore{}
+	m := New(ctrl, WithClock(func() time.Time { return now }), WithStore(store))
+
+	if _, err := m.Schedule(context.Background(), power.ActionRestart, true, now); err != nil {
+		t.Fatalf("Schedule() error = %v", err)
+	}
+	if store.saved.Pending == nil {
+		t.Fatal("setup: Schedule() did not persist the pending action")
+	}
+
+	// Tick blocks for as long as Execute does, so it runs on its own goroutine;
+	// <-ctrl.entered proves Execute has started and not yet returned.
+	go m.Tick()
+	<-ctrl.entered
+
+	if store.saved.Pending != nil {
+		t.Errorf("saved = %+v, want the pending record cleared before Execute returns, "+
+			"not after — a restart landing here must not re-arm it", store.saved)
+	}
+
+	close(ctrl.release)
+}
+
 // TestADeadlineExactlyAtMissedGraceStillFires pins the inclusive MissedGrace
 // boundary in Tick: the comparison is now.Sub(firesAt) > MissedGrace, so an
 // exact match still fires rather than being reported as missed.
@@ -661,5 +696,120 @@ func TestRestoreReArmsADeadlineExactlyAtMissedGrace(t *testing.T) {
 
 	if s := h.mgr.Status(); s.State != StatePending {
 		t.Errorf("State = %q, want pending: a deadline exactly MissedGrace past re-arms rather than misses", s.State)
+	}
+}
+
+// TestRestoreReArmingPersistsTheClearedMissedRecord pins that clearing a stale
+// Missed in memory during a re-arm also reaches disk. Without the write, the
+// file still names the old miss, and a restart before the next
+// Schedule/Abort/Tick would restore it and disagree with everything Status
+// has reported since the first restore.
+func TestRestoreReArmingPersistsTheClearedMissedRecord(t *testing.T) {
+	h := newHarness(t)
+	store := &memStore{saved: Persisted{
+		Missed: &Missed{Action: power.ActionSleep, WasDueAt: h.now.Format(time.RFC3339)},
+		Pending: &PersistedPending{
+			ID: "id-restored", Action: power.ActionShutdown, Force: true,
+			FiresAt: h.now.Add(time.Hour),
+		},
+	}}
+	h.mgr = New(h.fake, WithClock(func() time.Time { return h.now }), WithStore(store))
+
+	if err := h.mgr.Restore(); err != nil {
+		t.Fatalf("Restore() error = %v", err)
+	}
+
+	if store.saved.Missed != nil {
+		t.Errorf("saved = %+v, want the stale missed record cleared from disk, not just in memory", store.saved)
+	}
+	if store.saved.Pending == nil || store.saved.Pending.ID != "id-restored" {
+		t.Errorf("saved = %+v, want the re-armed pending action persisted", store.saved)
+	}
+}
+
+// TestRestoreRejectsAnInvalidRestoredAction pins that Restore validates a
+// restored action name instead of arming whatever a corrupted or hand-edited
+// state file names. An action that fails Valid() would otherwise sit armed
+// until it fires and fails unpredictably deep inside execute.
+func TestRestoreRejectsAnInvalidRestoredAction(t *testing.T) {
+	h := newHarness(t)
+	store := &memStore{saved: Persisted{Pending: &PersistedPending{
+		ID: "id-bad", Action: power.Action("explode"), Force: true,
+		FiresAt: h.now.Add(time.Hour),
+	}}}
+	h.mgr = New(h.fake, WithClock(func() time.Time { return h.now }), WithStore(store))
+
+	if err := h.mgr.Restore(); err == nil {
+		t.Error("Restore() error = nil, want an error reported for an invalid restored action")
+	}
+
+	s := h.mgr.Status()
+	if s.State != StateIdle {
+		t.Errorf("State = %q, want idle rather than an invalid action armed", s.State)
+	}
+	if store.saved.Pending != nil {
+		t.Errorf("saved = %+v, want the invalid schedule cleared from disk", store.saved)
+	}
+}
+
+// TestRestoreRejectsADeadlineBeyondMaxHorizon pins the other half of finding
+// 5: a deadline further out than MaxHorizon — from a hand-edited or corrupted
+// file — must not be armed either. Restore's own missed-vs-pending comparison
+// only catches deadlines in the past; nothing previously stopped one far in
+// the future from being armed and permanently occupying the single schedule
+// slot with ErrConflict until an operator noticed and aborted it.
+func TestRestoreRejectsADeadlineBeyondMaxHorizon(t *testing.T) {
+	h := newHarness(t)
+	store := &memStore{saved: Persisted{Pending: &PersistedPending{
+		ID: "id-toofar", Action: power.ActionShutdown, Force: true,
+		FiresAt: h.now.Add(MaxHorizon + time.Hour),
+	}}}
+	h.mgr = New(h.fake, WithClock(func() time.Time { return h.now }), WithStore(store))
+
+	if err := h.mgr.Restore(); err == nil {
+		t.Error("Restore() error = nil, want an error reported for a deadline beyond MaxHorizon")
+	}
+
+	s := h.mgr.Status()
+	if s.State != StateIdle {
+		t.Errorf("State = %q, want idle rather than a too-distant deadline permanently occupying the slot", s.State)
+	}
+	if store.saved.Pending != nil {
+		t.Errorf("saved = %+v, want the invalid schedule cleared from disk", store.saved)
+	}
+
+	// The manager must still be usable: rejecting the bad file must not wedge
+	// the single slot behind ErrConflict.
+	if _, err := h.mgr.Schedule(context.Background(), power.ActionRestart, true, h.now.Add(time.Hour)); err != nil {
+		t.Errorf("Schedule() after rejecting a restored schedule error = %v, want nil", err)
+	}
+}
+
+// TestRestoreConvertsRestoredTimesToTheCurrentZone pins finding 6: a restored
+// deadline must be reformatted with the PC's current offset, not the one it
+// was saved with, or a DST change between saving and loading would show the
+// wrong hour in FiresAtLocal (and, on the missed path, WasDueAt). This uses a
+// fixed offset far from the test process's own zone so a Location() that
+// silently stayed unconverted would show up as a wrong offset in the
+// formatted string.
+func TestRestoreConvertsRestoredTimesToTheCurrentZone(t *testing.T) {
+	fixed := time.FixedZone("FIXED+05", 5*3600)
+	h := newHarness(t)
+	firesAt := h.now.Add(time.Hour).In(fixed)
+	store := &memStore{saved: Persisted{Pending: &PersistedPending{
+		ID: "id-restored", Action: power.ActionShutdown, Force: true,
+		FiresAt: firesAt,
+	}}}
+	h.mgr = New(h.fake, WithClock(func() time.Time { return h.now }), WithStore(store))
+
+	if err := h.mgr.Restore(); err != nil {
+		t.Fatalf("Restore() error = %v", err)
+	}
+
+	h.mgr.mu.Lock()
+	gotLocation := h.mgr.firesAt.Location()
+	h.mgr.mu.Unlock()
+	if gotLocation == fixed {
+		t.Error("firesAt kept the offset it was saved with instead of being converted with .Local()")
 	}
 }

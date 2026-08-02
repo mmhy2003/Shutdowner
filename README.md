@@ -23,7 +23,11 @@ own. The same logo also becomes the web UI's favicon and the image the
 dashboard shows above its card, embedded as `internal/web/static/favicon.ico`
 and `internal/web/static/logo.png`. All of them are committed, so a normal build
 needs neither the network nor any extra tool; run `make icon` to rebuild them
-after changing the logo.
+after changing the logo. The dashboard logo's `width` is set by `make icon`'s
+`-width 480` and its `height` is only derived from that by the trim `make icon`
+applies, so changing the logo's aspect ratio means also updating the `height`
+attribute on the `<img class="logo">` in `internal/web/templates/dashboard.html`
+by hand — nothing keeps the two in sync automatically.
 
 ## Install on the Windows PC
 
