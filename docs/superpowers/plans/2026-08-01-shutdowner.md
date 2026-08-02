@@ -5422,9 +5422,15 @@ func runServer() error {
 		http: &http.Server{
 			Addr:    cfg.Listen,
 			Handler: srv.Routes(),
-			// The tunnel is the only client, but a slow-header attack would
-			// still tie up connections without this.
+			// The tunnel is the only client, but a slow-header or slow-body
+			// attack would still tie up connections without these. WriteTimeout
+			// is safe at 30s because no handler blocks: a power action is
+			// executed by the action manager's timer goroutine, never inside a
+			// request.
 			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       20 * time.Second,
+			WriteTimeout:      30 * time.Second,
+			IdleTimeout:       120 * time.Second,
 		},
 	}
 
