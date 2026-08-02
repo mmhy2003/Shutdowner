@@ -113,6 +113,20 @@ make run-dev
 - After a shutdown fires, the page shows "PC is offline" rather than a
   connection error. Being unreachable is the confirmation.
 
+### Scheduling
+
+Every action can run now, after a delay, or at a wall-clock time, chosen in the
+confirm dialog. A time means the PC's clock, not the clock of the device holding
+the browser; when the two disagree the dialog says so and shows both. Schedules
+reach at most 7 days ahead.
+
+A pending schedule is kept in `schedule.json` beside the `.env`, so restarting
+the service does not lose it. If its moment passes while the service is stopped
+or the machine is asleep, the action is **skipped rather than run late** — being
+shut down moments after deliberately waking the PC is worse than the action not
+happening — and the dashboard reports it until dismissed. The cutoff is five
+minutes past the deadline.
+
 ## Security notes
 
 - The password is stored hashed. That does not protect against someone who can
