@@ -17,7 +17,8 @@
   var state = {
     pending: null,     // { id, action, firesAtMs }
     firedAction: null, // the action whose countdown reached zero
-    failedPolls: 0
+    failedPolls: 0,
+    localTime: null
   };
 
   async function post(path, payload) {
@@ -57,10 +58,41 @@
     return "up " + m + "m";
   }
 
+  // The status endpoint reports the PC's time as RFC3339 with the PC's offset.
+  // Slicing the wall-clock part and appending "Z" gives a Date whose UTC fields
+  // hold the PC's reading, which makes date arithmetic possible without the
+  // browser's timezone ever being consulted.
+  function pcWallDate(iso) {
+    return new Date(iso.slice(0, 19) + "Z");
+  }
+
+  function pcWallInput(d) {
+    return d.toISOString().slice(0, 16);
+  }
+
+  function pcOffsetMinutes(iso) {
+    var m = /([+-])(\d{2}):(\d{2})$/.exec(iso);
+    if (!m) return 0;
+    var mins = parseInt(m[2], 10) * 60 + parseInt(m[3], 10);
+    return m[1] === "-" ? -mins : mins;
+  }
+
+  function formatWait(seconds) {
+    if (seconds < 60) return seconds + "s";
+    var mins = Math.round(seconds / 60);
+    if (mins < 60) return mins + "m";
+    var h = Math.floor(mins / 60);
+    var m = mins % 60;
+    return m === 0 ? h + "h" : h + "h " + m + "m";
+  }
+
+  // Sliced as text, like every other reading of the PC's clock in this file.
+  // Parsing through Date() and reformatting with toLocaleTimeString(), as this
+  // used to, renders the instant in the BROWSER's zone while the "local" label
+  // implies the PC's — correct only when the two happen to agree.
   function formatClock(iso) {
-    var t = new Date(iso);
-    if (isNaN(t.getTime())) return "";
-    return t.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) + " local";
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(iso || "")) return "";
+    return iso.slice(11, 16) + " local";
   }
 
   // The countdown is rendered from a locally computed deadline so it ticks
@@ -74,7 +106,20 @@
     box.classList.remove("hidden");
     var left = Math.max(0, Math.round((state.pending.firesAtMs - Date.now()) / 1000));
     var label = LABELS[state.pending.action] || state.pending.action;
-    el("pending-text").textContent = label + " in " + left + "s";
+    var text = label + " in " + formatWait(left);
+    // Past a minute the countdown alone stops being useful, so name the hour it
+    // lands on. The wall-clock characters are taken from the server's string as
+    // text: passing it through Date() would re-read it in the browser's
+    // timezone, which is the one thing the design rules out. A schedule can
+    // reach days out, so a bare time is ambiguous the same way the missed
+    // banner's is — only drop the date when it is unmistakably today, compared
+    // as text against the PC's own idea of "today".
+    if (left >= 60 && state.pending.firesAtLocal) {
+      var sameDay = state.localTime && state.localTime.slice(0, 10) === state.pending.firesAtLocal.slice(0, 10);
+      var when = sameDay ? state.pending.firesAtLocal.slice(11, 16) : state.pending.firesAtLocal.slice(0, 16).replace("T", " ");
+      text += " · at " + when;
+    }
+    el("pending-text").textContent = text;
     if (left === 0) state.firedAction = state.pending.action;
   }
 
@@ -85,6 +130,7 @@
     el("hostname").textContent = data.hostname;
     el("os").textContent = data.os;
     el("uptime").textContent = formatUptime(data.uptimeSeconds);
+    state.localTime = data.localTime;
     el("localtime").textContent = formatClock(data.localTime);
 
     document.querySelectorAll(".action").forEach(function (b) {
@@ -108,10 +154,29 @@
       state.pending = {
         id: data.pending.id,
         action: data.pending.action,
-        firesAtMs: Date.now() + data.pending.remainingSeconds * 1000
+        firesAtMs: Date.now() + data.pending.remainingSeconds * 1000,
+        firesAtLocal: data.pending.firesAtLocal
       };
     } else {
       state.pending = null;
+    }
+
+    var missed = el("missed");
+    if (data.missed) {
+      var mLabel = LABELS[data.missed.action] || data.missed.action;
+      // A miss can span days once the machine has been asleep or the service
+      // down, so a bare time is ambiguous — only drop the date when it is
+      // unmistakably today. The comparison is on the date characters as text,
+      // the same rule as everywhere else the PC's clock is read, so the PC's
+      // own idea of "today" decides rather than the browser's. Without a
+      // reading of the PC's clock yet, showing the date is the safer default.
+      var sameDay = state.localTime && state.localTime.slice(0, 10) === data.missed.wasDueAt.slice(0, 10);
+      var when = sameDay ? data.missed.wasDueAt.slice(11, 16) : data.missed.wasDueAt.slice(0, 16).replace("T", " ");
+      el("missed-text").textContent =
+        mLabel + " was due at " + when + " and was skipped: the PC was off or asleep.";
+      missed.classList.remove("hidden");
+    } else {
+      missed.classList.add("hidden");
     }
 
     showError(data.state === "failed" ? data.error : "");
@@ -142,6 +207,115 @@
     }
   }
 
+  function selectedWhen() {
+    var checked = document.querySelector('input[name="when"]:checked');
+    return checked ? checked.value : "now";
+  }
+
+  // #when-in-value's max is only correct for whichever unit is selected: 10080
+  // minutes and 168 hours are both the same 7-day server limit
+  // (action.MaxHorizon), but the HTML max="10080" written into the template is
+  // right for minutes only. Left unsynced, "hours" would let the browser's own
+  // constraint validation wave through a value the server still refuses.
+  function syncWhenInMax() {
+    var value = el("when-in-value");
+    var max = el("when-in-unit").value === "60" ? 10080 : 168;
+    value.max = max;
+    if (parseInt(value.value, 10) > max) value.value = String(max);
+  }
+
+  // Reset to Now, bound the picker to the PC's clock, and say so when the phone
+  // holding the browser disagrees with the machine about what time it is.
+  function resetWhen() {
+    document.querySelector('input[name="when"][value="now"]').checked = true;
+    el("when-in-value").value = "1";
+    el("when-in-unit").value = "3600";
+    syncWhenInMax();
+    el("when-now-label").textContent =
+      defaultDelay > 0 ? "Now (" + defaultDelay + "s countdown)" : "Now";
+
+    var note = el("tz-note");
+    var at = el("when-at");
+    if (!state.localTime) {
+      at.value = "";
+      at.removeAttribute("min");
+      at.removeAttribute("max");
+      note.classList.add("hidden");
+      return;
+    }
+
+    var pcNow = pcWallDate(state.localTime);
+    // The picker's granularity is minutes, so its min must be rounded UP to
+    // the next whole minute rather than truncated down to the current one:
+    // the current minute is already partway elapsed, and by the time the
+    // server parses that value back it is in the past, which it rejects.
+    var pcMinMinute = new Date(Math.ceil(pcNow.getTime() / 60000) * 60000);
+    at.min = pcWallInput(pcMinMinute);
+    at.max = pcWallInput(new Date(pcNow.getTime() + 7 * 86400000));
+    at.value = pcWallInput(new Date(pcNow.getTime() + 3600000));
+
+    var pcOffset = pcOffsetMinutes(state.localTime);
+    var browserOffset = -new Date().getTimezoneOffset();
+    if (pcOffset === browserOffset) {
+      note.classList.add("hidden");
+      return;
+    }
+    var browserNow = new Date();
+    note.textContent =
+      "Times are the PC's clock, which reads " + at.min.slice(11) +
+      ". Your device reads " +
+      String(browserNow.getHours()).padStart(2, "0") + ":" +
+      String(browserNow.getMinutes()).padStart(2, "0") + ".";
+    note.classList.remove("hidden");
+  }
+
+  function whenPayload() {
+    switch (selectedWhen()) {
+      case "in":
+        var n = parseInt(el("when-in-value").value, 10);
+        if (!(n > 0)) throw new Error("Enter how long to wait.");
+        var seconds = n * parseInt(el("when-in-unit").value, 10);
+        // The max attribute tracks the unit (see syncWhenInMax), but an
+        // attribute is only ever a suggestion to the browser, not a guarantee —
+        // so the same 7-day cap the server enforces (action.MaxHorizon) is
+        // checked again here, worded in what the operator typed rather than
+        // the API's raw seconds.
+        if (seconds > 604800) throw new Error("A schedule can reach at most 7 days ahead.");
+        return { delaySeconds: seconds };
+      case "at":
+        var at = el("when-at").value;
+        if (!at) throw new Error("Pick a date and time.");
+        // With no step attribute a datetime-local input's own granularity is
+        // already minutes; slicing to 16 characters is defensive, not a
+        // workaround for anything the control actually emits.
+        return { at: at.slice(0, 16) };
+      default:
+        return {};
+    }
+  }
+
+  el("when-in-unit").addEventListener("change", syncWhenInMax);
+
+  // A <label> wrapping the radio and the row's other controls only forwards a
+  // click or keystroke to the radio when the target is the label's own text;
+  // per the HTML spec a label's default activation behaviour does nothing for
+  // events aimed at an interactive descendant. So typing in the number input
+  // or the datetime picker, or opening the unit select, leaves "Now" checked
+  // while the operator believes they picked "In" or "At" — and the action
+  // fires on the short countdown instead of the deferred time they set.
+  // Binding input/focus on each control and checking that row's radio closes
+  // the gap the label's own behaviour leaves open.
+  function checkWhenRow(value) {
+    var radio = document.querySelector('input[name="when"][value="' + value + '"]');
+    if (radio) radio.checked = true;
+  }
+  ["when-in-value", "when-in-unit"].forEach(function (id) {
+    el(id).addEventListener("input", function () { checkWhenRow("in"); });
+    el(id).addEventListener("focus", function () { checkWhenRow("in"); });
+  });
+  el("when-at").addEventListener("input", function () { checkWhenRow("at"); });
+  el("when-at").addEventListener("focus", function () { checkWhenRow("at"); });
+
   var dialog = el("confirm");
   var chosenAction = null;
 
@@ -149,9 +323,9 @@
     button.addEventListener("click", function () {
       chosenAction = button.dataset.action;
       var label = LABELS[chosenAction] || chosenAction;
-      var suffix = defaultDelay > 0 ? " this PC in " + defaultDelay + "s?" : " this PC?";
-      el("confirm-title").textContent = label + suffix;
+      el("confirm-title").textContent = label + " this PC?";
       el("graceful").checked = false;
+      resetWhen();
       // Browsers only began clearing returnValue on showModal() in 2023
       // (Chrome 119, Firefox 121, Safari 17.4). On anything older it persists,
       // so a previous "confirm" would still be there after dismissing this
@@ -167,12 +341,16 @@
     var force = !el("graceful").checked;
     try {
       showError("");
-      var data = await post("/api/action", { action: chosenAction, force: force });
+      var payload = whenPayload();
+      payload.action = chosenAction;
+      payload.force = force;
+      var data = await post("/api/action", payload);
       state.firedAction = null;
       state.pending = {
         id: data.id,
         action: chosenAction,
-        firesAtMs: Date.now() + data.remainingSeconds * 1000
+        firesAtMs: Date.now() + data.remainingSeconds * 1000,
+        firesAtLocal: data.firesAtLocal
       };
       render();
     } catch (e) {
@@ -188,6 +366,15 @@
       state.firedAction = null;
       showError("");
       render();
+    } catch (e) {
+      showError(e.message);
+    }
+  });
+
+  el("dismiss").addEventListener("click", async function () {
+    try {
+      await post("/api/dismiss", {});
+      el("missed").classList.add("hidden");
     } catch (e) {
       showError(e.message);
     }

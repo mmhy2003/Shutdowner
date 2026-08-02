@@ -17,6 +17,18 @@ make build-windows      # produces dist/shutdowner.exe
 make test               # runs the suite on any platform
 ```
 
+The executable's icon comes from `logo.png` by way of `assets/icon.ico` and
+`cmd/shutdowner/rsrc_windows_amd64.syso`, which the Go linker picks up on its
+own. The same logo also becomes the web UI's favicon and the image the
+dashboard shows above its card, embedded as `internal/web/static/favicon.ico`
+and `internal/web/static/logo.png`. All of them are committed, so a normal build
+needs neither the network nor any extra tool; run `make icon` to rebuild them
+after changing the logo. The dashboard logo's `width` is set by `make icon`'s
+`-width 480` and its `height` is only derived from that by the trim `make icon`
+applies, so changing the logo's aspect ratio means also updating the `height`
+attribute on the `<img class="logo">` in `internal/web/templates/dashboard.html`
+by hand — nothing keeps the two in sync automatically.
+
 ## Install on the Windows PC
 
 1. Copy `shutdowner.exe` to `C:\Program Files\Shutdowner\`.
@@ -104,6 +116,20 @@ make run-dev
   common after `powercfg /h off`.
 - After a shutdown fires, the page shows "PC is offline" rather than a
   connection error. Being unreachable is the confirmation.
+
+### Scheduling
+
+Every action can run now, after a delay, or at a wall-clock time, chosen in the
+confirm dialog. A time means the PC's clock, not the clock of the device holding
+the browser; when the two disagree the dialog says so and shows both. Schedules
+reach at most 7 days ahead.
+
+A pending schedule is kept in `schedule.json` beside the `.env`, so restarting
+the service does not lose it. If its moment passes while the service is stopped
+or the machine is asleep, the action is **skipped rather than run late** — being
+shut down moments after deliberately waking the PC is worse than the action not
+happening — and the dashboard reports it until dismissed. The cutoff is five
+minutes past the deadline.
 
 ## Security notes
 

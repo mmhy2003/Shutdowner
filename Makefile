@@ -1,6 +1,14 @@
 GO ?= go
 DIST := dist
 BIN := $(DIST)/shutdowner.exe
+LOGO := logo.png
+ICON := assets/icon.ico
+FAVICON := internal/web/static/favicon.ico
+LOGO_PNG := internal/web/static/logo.png
+# Naming a .syso for an explicit GOOS_GOARCH is what keeps the Go linker from
+# feeding an amd64 COFF object to a build for any other target.
+SYSO := cmd/shutdowner/rsrc_windows_amd64.syso
+RSRC := github.com/akavel/rsrc@v0.10.2
 
 # Recipes run under PowerShell on Windows and /bin/sh elsewhere. Shell-specific
 # fragments (env prefixes, mkdir -p, rm -rf) are factored into variables so the
@@ -19,7 +27,7 @@ MKDIR_DIST := mkdir -p $(DIST)
 RM_DIST := rm -rf $(DIST)
 endif
 
-.PHONY: test vet build-windows run-dev fmt clean
+.PHONY: test vet build-windows run-dev fmt icon clean
 
 test:
 	$(GO) test ./...
@@ -37,6 +45,24 @@ build-windows:
 
 run-dev:
 	$(GO) run ./cmd/shutdowner --console --fake-power --config ./.env.dev
+
+# Rebuilds everything derived from $(LOGO): the executable's icon, the web UI's
+# favicon, and the logo the dashboard shows above its card. Every output is
+# committed, the Go toolchain links the .syso in on its own and go:embed picks
+# up the two web assets, so build-windows does not depend on this: it only needs
+# running when the logo changes, and it is the only target that reaches the
+# network (for rsrc, on a cold module cache).
+#
+# The favicon carries only the sizes a browser has a use for, and stores them as
+# PNG rather than as the DIBs the Windows shell prefers, which takes it from
+# 15 KB to 5 KB. The dashboard logo is the one output that keeps the wordmark:
+# it is displayed at 15rem, where the words are legible, and is rendered at
+# twice that so it stays sharp on a phone.
+icon:
+	$(GO) run ./tools/mkicon -in $(LOGO) -out $(ICON)
+	$(GO) run ./tools/mkicon -in $(LOGO) -out $(FAVICON) -sizes 16,32,48 -dib-max 0
+	$(GO) run ./tools/mkicon -in $(LOGO) -out $(LOGO_PNG) -full 0,0,700,700 -width 480
+	$(GO) run $(RSRC) -ico $(ICON) -arch amd64 -o $(SYSO)
 
 clean:
 	$(RM_DIST)

@@ -32,9 +32,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	}
 
 	fake := power.NewFake()
-	// A zero delay is not used here: tests need a countdown long enough to
-	// observe the pending state before it fires.
-	actions := action.New(fake, 45*time.Second)
+	actions := action.New(fake)
 	limiter := auth.NewLimiter(auth.DefaultPerIPLimit, auth.DefaultGlobalLimit, auth.DefaultWindow)
 
 	srv, err := New(Options{
@@ -44,6 +42,8 @@ func newTestEnv(t *testing.T) *testEnv {
 		Power:        fake,
 		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 		PasswordHash: hash,
+		// A zero delay is not used here: tests need a countdown long enough to
+		// observe the pending state before it fires.
 		DelaySeconds: 45,
 	})
 	if err != nil {

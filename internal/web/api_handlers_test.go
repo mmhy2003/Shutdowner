@@ -3,10 +3,12 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"shutdowner/internal/power"
 )
@@ -73,6 +75,39 @@ func TestStatusReportsCapabilities(t *testing.T) {
 	}
 	if caps["sleep"] != true || caps["hibernate"] != false {
 		t.Errorf("capabilities = %v, want sleep true and hibernate false", caps)
+	}
+}
+
+// TestStatusReportsAMissedAction pins that a populated Missed record on the
+// manager actually reaches the client: handleStatus hand-copies the field
+// from action.Status rather than deriving it, and nothing previously failed
+// if that copy were ever deleted — on the one feature whose entire purpose is
+// telling the operator the PC did not do what they asked.
+func TestStatusReportsAMissedAction(t *testing.T) {
+	e := newTestEnv(t)
+
+	// Driving the manager into StateMissed directly, rather than through
+	// /api/action, avoids waiting on real time: a deadline already
+	// MissedGrace in the past is missed on the very next Tick.
+	past := time.Now().Add(-time.Hour)
+	if _, err := e.actions.Schedule(context.Background(), power.ActionSleep, false, past); err != nil {
+		t.Fatalf("Schedule() error = %v", err)
+	}
+	e.actions.Tick()
+	if s := e.actions.Status(); s.State != "missed" {
+		t.Fatalf("setup: State = %q, want missed", s.State)
+	}
+
+	_, body := getJSON(t, e, "/api/status")
+	missed, ok := body["missed"].(map[string]any)
+	if !ok {
+		t.Fatalf("missed = %v, want an object", body["missed"])
+	}
+	if missed["action"] != "sleep" {
+		t.Errorf("missed.action = %v, want sleep", missed["action"])
+	}
+	if wasDueAt, ok := missed["wasDueAt"].(string); !ok || wasDueAt == "" {
+		t.Errorf("missed.wasDueAt = %v, want a non-empty string", missed["wasDueAt"])
 	}
 }
 
@@ -223,9 +258,14 @@ func TestDashboardDisablesUnavailableActions(t *testing.T) {
 
 func TestCapabilitiesErrorDoesNotBreakTheDashboard(t *testing.T) {
 	e := newTestEnv(t)
-	// power.New() off Windows returns ErrUnsupported from Capabilities. The
-	// dashboard must degrade to "nothing available" rather than 500.
-	e.srv.power = power.New()
+	// The dashboard must degrade to "nothing available" rather than 500.
+	//
+	// This used to swap in power.New(), on the assumption that it was the
+	// stub returning ErrUnsupported — which it is on every platform except the
+	// one the app ships on. On Windows it was the real controller, so the test
+	// asserted that the developer's own machine could neither sleep nor
+	// hibernate, and failed on any machine that could do either.
+	e.fake.SetCapabilitiesError(errors.New("GetPwrCapabilities failed"))
 
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.AddCookie(e.sessionCookie(t))
@@ -258,5 +298,81 @@ func TestOversizedAbortBodyIsRejected(t *testing.T) {
 	huge := `{"id":"` + strings.Repeat("x", 16<<10) + `"}`
 	if res := postJSON(t, e, "/api/abort", huge); res.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", res.Code)
+	}
+}
+
+func TestActionAcceptsARelativeSchedule(t *testing.T) {
+	e := newTestEnv(t)
+	res := postJSON(t, e, "/api/action", `{"action":"shutdown","force":true,"delaySeconds":7200}`)
+	if res.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202: %s", res.Code, res.Body)
+	}
+	var got struct {
+		RemainingSeconds int `json:"remainingSeconds"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decoding the response: %v", err)
+	}
+	// Allow a second of slack for the clock moving during the request.
+	if got.RemainingSeconds < 7199 || got.RemainingSeconds > 7200 {
+		t.Errorf("remainingSeconds = %d, want about 7200", got.RemainingSeconds)
+	}
+}
+
+func TestActionRejectsBadSchedules(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"both timing fields", `{"action":"shutdown","delaySeconds":60,"at":"2030-01-01T00:00"}`},
+		{"a negative delay", `{"action":"shutdown","delaySeconds":-5}`},
+		{"a delay past the horizon", `{"action":"shutdown","delaySeconds":604801}`},
+		{"an unparseable at", `{"action":"shutdown","at":"tomorrow"}`},
+		{"an at in the past", `{"action":"shutdown","at":"2000-01-01T00:00"}`},
+		{"an at past the horizon", `{"action":"shutdown","at":"2099-01-01T00:00"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newTestEnv(t)
+			res := postJSON(t, e, "/api/action", tt.body)
+			if res.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400: %s", res.Code, res.Body)
+			}
+		})
+	}
+}
+
+func TestActionWithNoTimingFieldsKeepsTheConfiguredDelay(t *testing.T) {
+	e := newTestEnv(t)
+	res := postJSON(t, e, "/api/action", `{"action":"shutdown","force":true}`)
+	if res.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202: %s", res.Code, res.Body)
+	}
+	var got struct {
+		RemainingSeconds int `json:"remainingSeconds"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decoding the response: %v", err)
+	}
+	if got.RemainingSeconds < 44 || got.RemainingSeconds > 45 {
+		t.Errorf("remainingSeconds = %d, want the configured 45", got.RemainingSeconds)
+	}
+}
+
+func TestDismissIsIdempotent(t *testing.T) {
+	e := newTestEnv(t)
+	// Nothing has been missed, and it still succeeds.
+	if res := postJSON(t, e, "/api/dismiss", `{}`); res.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200: %s", res.Code, res.Body)
+	}
+}
+
+func TestDismissRequiresCSRF(t *testing.T) {
+	e := newTestEnv(t)
+	r := httptest.NewRequest(http.MethodPost, "/api/dismiss", strings.NewReader(`{}`))
+	r.AddCookie(e.sessionCookie(t))
+	r.Header.Set("Content-Type", "application/json")
+	if res := do(t, e.handler, r); res.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403 without a CSRF token", res.Code)
 	}
 }

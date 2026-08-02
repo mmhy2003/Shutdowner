@@ -95,6 +95,24 @@ func configPath() (string, error) {
 	return filepath.Join(dir, ".env"), nil
 }
 
+// schedulePath puts the state file beside the .env it belongs to, so a
+// --config pointing elsewhere keeps its schedule with it rather than in
+// whatever directory the service happened to start in.
+func schedulePath(configFlag string) (string, error) {
+	if configFlag != "" {
+		abs, err := filepath.Abs(configFlag)
+		if err != nil {
+			return "", fmt.Errorf("resolving --config path: %w", err)
+		}
+		return filepath.Join(filepath.Dir(abs), "schedule.json"), nil
+	}
+	dir, err := config.ExeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "schedule.json"), nil
+}
+
 func runInit() error {
 	path, err := configPath()
 	if err != nil {
@@ -228,10 +246,27 @@ func runServer() error {
 		ctrl = power.NewFake()
 	}
 
+	statePath, err := schedulePath(*flagConfig)
+	if err != nil {
+		return err
+	}
+	actions := action.New(ctrl,
+		action.WithStore(action.NewFileStore(statePath)),
+		action.WithLogger(logger),
+	)
+	if err := actions.Restore(); err != nil {
+		// A corrupt or unreadable state file loses the schedule, which is a
+		// great deal better than refusing to start the thing that answers the
+		// door.
+		logger.Warn("restoring the saved schedule", "path", statePath, "error", err)
+	}
+	stopTicking := actions.Start(action.TickInterval)
+	defer stopTicking()
+
 	srv, err := web.New(web.Options{
 		Sessions:     auth.NewSessionManager(cfg.SessionSecret, cfg.SessionTTL),
 		Limiter:      auth.NewLimiter(auth.DefaultPerIPLimit, auth.DefaultGlobalLimit, auth.DefaultWindow),
-		Actions:      action.New(ctrl, cfg.Delay),
+		Actions:      actions,
 		Power:        ctrl,
 		Logger:       logger,
 		PasswordHash: cfg.PasswordHash,
@@ -249,7 +284,7 @@ func runServer() error {
 			// The tunnel is the only client, but a slow-header or slow-body
 			// attack would still tie up connections without these. WriteTimeout
 			// is safe at 30s because no handler blocks: a power action is
-			// executed by the action manager's timer goroutine, never inside a
+			// executed by the action manager's tick goroutine, never inside a
 			// request.
 			ReadHeaderTimeout: 10 * time.Second,
 			ReadTimeout:       20 * time.Second,

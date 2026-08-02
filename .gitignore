@@ -1,5 +1,6 @@
 .env
 .env.dev
+schedule.json
 dist/
 *.log
 *.log.[0-9]

@@ -7,6 +7,7 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"shutdowner/internal/action"
 	"shutdowner/internal/auth"
@@ -35,6 +36,7 @@ type Server struct {
 	static       http.Handler
 	passwordHash string
 	delaySeconds int
+	delay        time.Duration
 }
 
 func New(o Options) (*Server, error) {
@@ -62,6 +64,7 @@ func New(o Options) (*Server, error) {
 		static:       static,
 		passwordHash: o.PasswordHash,
 		delaySeconds: o.DelaySeconds,
+		delay:        time.Duration(o.DelaySeconds) * time.Second,
 	}, nil
 }
 
@@ -78,7 +81,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/status", s.requireSession(s.handleStatus))
 	mux.HandleFunc("POST /api/action", limitBody(maxRequestBody, s.requireSession(s.requireCSRF(s.handleAction))))
 	mux.HandleFunc("POST /api/abort", limitBody(maxRequestBody, s.requireSession(s.requireCSRF(s.handleAbort))))
+	mux.HandleFunc("POST /api/dismiss", limitBody(maxRequestBody, s.requireSession(s.requireCSRF(s.handleDismiss))))
 	mux.HandleFunc("GET /healthz", s.handleHealth)
+	mux.HandleFunc("GET /favicon.ico", handleFavicon)
 	mux.Handle("GET /static/", s.static)
 	return securityHeaders(recoverPanic(s.logger, mux))
 }
