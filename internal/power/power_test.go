@@ -75,6 +75,67 @@ func TestCapabilitiesAllows(t *testing.T) {
 	}
 }
 
+func TestSystemPowerCapabilitiesMapping(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  systemPowerCapabilities
+		want Capabilities
+	}{
+		// The case this was originally written for, and the only one it used to
+		// get right: a machine old enough to suspend to RAM through ACPI S3.
+		{
+			"legacy S3 sleep",
+			systemPowerCapabilities{SystemS3: 1},
+			Capabilities{Sleep: true},
+		},
+		// Every recent laptop. Windows turns S3 off when the firmware offers S0
+		// low power idle, so reading SystemS3 alone reports a machine that
+		// sleeps perfectly well as unable to sleep at all.
+		{
+			"modern standby, S3 disabled",
+			systemPowerCapabilities{AoAc: 1},
+			Capabilities{Sleep: true},
+		},
+		{
+			"neither sleep state",
+			systemPowerCapabilities{},
+			Capabilities{},
+		},
+		// Hibernation needs the file as well as the state: powercfg /h off
+		// leaves SystemS4 set and takes the file away.
+		{
+			"hibernate enabled",
+			systemPowerCapabilities{SystemS4: 1, HiberFilePresent: 1},
+			Capabilities{Hibernate: true},
+		},
+		{
+			"hibernate turned off with powercfg /h off",
+			systemPowerCapabilities{SystemS4: 1},
+			Capabilities{},
+		},
+		// Exactly what GetPwrCapabilities returns on the development machine,
+		// cross-checked against powercfg /a.
+		{
+			"observed modern standby machine",
+			systemPowerCapabilities{
+				PowerButtonPresent: 1, SleepButtonPresent: 1, LidPresent: 1,
+				SystemS4: 1, SystemS5: 1, HiberFilePresent: 1, FullWake: 1,
+				VideoDimPresent: 1, ThermalControl: 1, Hiberboot: 1,
+				WakeAlarmPresent: 1, AoAc: 1, HiberFileType: 2,
+				AoAcConnectivitySupported: 1,
+			},
+			Capabilities{Sleep: true, Hibernate: true},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.raw.capabilities(); got != tt.want {
+				t.Errorf("capabilities() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestFakeRecordsCalls(t *testing.T) {
 	f := NewFake()
 	ctx := context.Background()

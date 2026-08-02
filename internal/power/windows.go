@@ -22,24 +22,6 @@ var (
 	procGetPwrCapabilities = powrprof.NewProc("GetPwrCapabilities")
 )
 
-// systemPowerCapabilities mirrors the leading fields of the Win32
-// SYSTEM_POWER_CAPABILITIES struct. GetPwrCapabilities takes no size argument
-// and writes the entire struct, so the tail is padded generously rather than
-// transcribed field by field. Only SystemS3, SystemS4 and HiberFilePresent are
-// read; over-allocating the buffer is safe, under-allocating is not.
-type systemPowerCapabilities struct {
-	PowerButtonPresent byte
-	SleepButtonPresent byte
-	LidPresent         byte
-	SystemS1           byte
-	SystemS2           byte
-	SystemS3           byte
-	SystemS4           byte
-	SystemS5           byte
-	HiberFilePresent   byte
-	_                  [512]byte
-}
-
 type systemController struct{}
 
 func New() Controller { return systemController{} }
@@ -106,10 +88,7 @@ func (systemController) Capabilities(context.Context) (Capabilities, error) {
 	if r == 0 {
 		return Capabilities{}, fmt.Errorf("power: GetPwrCapabilities: %w", syscallError(err))
 	}
-	return Capabilities{
-		Sleep:     caps.SystemS3 != 0,
-		Hibernate: caps.SystemS4 != 0 && caps.HiberFilePresent != 0,
-	}, nil
+	return caps.capabilities(), nil
 }
 
 func boolArg(b bool) uintptr {

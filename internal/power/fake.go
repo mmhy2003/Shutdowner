@@ -14,10 +14,11 @@ type Call struct {
 // Fake is a Controller that records calls instead of touching the machine. It
 // backs the unit tests and the --fake-power development flag.
 type Fake struct {
-	mu    sync.Mutex
-	caps  Capabilities
-	err   error
-	calls []Call
+	mu      sync.Mutex
+	caps    Capabilities
+	err     error
+	capsErr error
+	calls   []Call
 }
 
 // NewFake returns a Fake reporting every capability as available.
@@ -45,10 +46,24 @@ func (f *Fake) Execute(_ context.Context, a Action, force bool) error {
 	return f.err
 }
 
+// SetCapabilitiesError makes every subsequent Capabilities call fail. It is
+// separate from SetError because the two failures are meant to be handled
+// differently: a failed Execute is reported to the user, a failed
+// GetPwrCapabilities has to leave the dashboard standing.
+//
+// The configured capabilities keep being returned alongside the error, so a
+// caller that trusts the value instead of the error is caught rather than
+// accidentally passing.
+func (f *Fake) SetCapabilitiesError(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.capsErr = err
+}
+
 func (f *Fake) Capabilities(context.Context) (Capabilities, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.caps, nil
+	return f.caps, f.capsErr
 }
 
 // Calls returns a copy of the recorded calls.

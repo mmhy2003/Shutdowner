@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -223,9 +224,14 @@ func TestDashboardDisablesUnavailableActions(t *testing.T) {
 
 func TestCapabilitiesErrorDoesNotBreakTheDashboard(t *testing.T) {
 	e := newTestEnv(t)
-	// power.New() off Windows returns ErrUnsupported from Capabilities. The
-	// dashboard must degrade to "nothing available" rather than 500.
-	e.srv.power = power.New()
+	// The dashboard must degrade to "nothing available" rather than 500.
+	//
+	// This used to swap in power.New(), on the assumption that it was the
+	// stub returning ErrUnsupported — which it is on every platform except the
+	// one the app ships on. On Windows it was the real controller, so the test
+	// asserted that the developer's own machine could neither sleep nor
+	// hibernate, and failed on any machine that could do either.
+	e.fake.SetCapabilitiesError(errors.New("GetPwrCapabilities failed"))
 
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.AddCookie(e.sessionCookie(t))
