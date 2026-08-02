@@ -32,6 +32,7 @@ type Server struct {
 	power        power.Controller
 	logger       *slog.Logger
 	tmpl         *template.Template
+	static       http.Handler
 	passwordHash string
 	delaySeconds int
 }
@@ -47,6 +48,10 @@ func New(o Options) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("web: parsing templates: %w", err)
 	}
+	static, err := staticHandler()
+	if err != nil {
+		return nil, fmt.Errorf("web: preparing static assets: %w", err)
+	}
 	return &Server{
 		sessions:     o.Sessions,
 		limiter:      o.Limiter,
@@ -54,12 +59,13 @@ func New(o Options) (*Server, error) {
 		power:        o.Power,
 		logger:       o.Logger,
 		tmpl:         tmpl,
+		static:       static,
 		passwordHash: o.PasswordHash,
 		delaySeconds: o.DelaySeconds,
 	}, nil
 }
 
-// Routes builds the handler tree. Task 14 adds the static assets.
+// Routes builds the handler tree.
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	// "/{$}" matches only the root path; a bare "/" would swallow every 404.
@@ -71,6 +77,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/action", s.requireSession(s.requireCSRF(s.handleAction)))
 	mux.HandleFunc("POST /api/abort", s.requireSession(s.requireCSRF(s.handleAbort)))
 	mux.HandleFunc("GET /healthz", s.handleHealth)
+	mux.Handle("GET /static/", s.static)
 	return securityHeaders(recoverPanic(s.logger, mux))
 }
 
