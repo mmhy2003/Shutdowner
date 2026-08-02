@@ -237,3 +237,26 @@ func TestCapabilitiesErrorDoesNotBreakTheDashboard(t *testing.T) {
 		t.Errorf("capabilities = %+v, want both false on a controller error", caps)
 	}
 }
+
+func TestOversizedActionBodyIsRejected(t *testing.T) {
+	e := newTestEnv(t)
+
+	// Valid JSON, but padded far past the cap with an ignored field.
+	huge := `{"action":"shutdown","force":true,"pad":"` + strings.Repeat("x", 16<<10) + `"}`
+	res := postJSON(t, e, "/api/action", huge)
+
+	if res.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", res.Code)
+	}
+	if len(e.fake.Calls()) != 0 {
+		t.Error("an oversized request still scheduled an action")
+	}
+}
+
+func TestOversizedAbortBodyIsRejected(t *testing.T) {
+	e := newTestEnv(t)
+	huge := `{"id":"` + strings.Repeat("x", 16<<10) + `"}`
+	if res := postJSON(t, e, "/api/abort", huge); res.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", res.Code)
+	}
+}
