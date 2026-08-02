@@ -40,6 +40,7 @@ type actionRequest struct {
 type actionResponse struct {
 	ID               string `json:"id"`
 	RemainingSeconds int    `json:"remainingSeconds"`
+	FiresAtLocal     string `json:"firesAtLocal"`
 }
 
 type abortRequest struct {
@@ -118,6 +119,7 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, actionResponse{
 		ID:               pending.ID,
 		RemainingSeconds: pending.RemainingSeconds,
+		FiresAtLocal:     pending.FiresAtLocal,
 	})
 }
 

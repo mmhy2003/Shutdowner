@@ -37,6 +37,11 @@
 
     <p class="error hidden" id="error" role="alert"></p>
 
+    <div class="missed hidden" id="missed" role="alert">
+      <p id="missed-text"></p>
+      <button type="button" id="dismiss" class="link">Dismiss</button>
+    </div>
+
     <form method="post" action="/logout" class="logout">
       <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
       <button type="submit" class="link">Sign out</button>
@@ -47,6 +52,30 @@
     <form method="dialog">
       <h2 id="confirm-title"></h2>
       <label class="checkbox"><input type="checkbox" id="graceful"> Close apps gracefully</label>
+
+      <fieldset class="when">
+        <legend>When</legend>
+        <label class="radio">
+          <input type="radio" name="when" value="now" checked>
+          <span id="when-now-label">Now</span>
+        </label>
+        <label class="radio">
+          <input type="radio" name="when" value="in">
+          In
+          <input type="number" id="when-in-value" min="1" max="10080" value="1" inputmode="numeric">
+          <select id="when-in-unit">
+            <option value="60">minutes</option>
+            <option value="3600" selected>hours</option>
+          </select>
+        </label>
+        <label class="radio">
+          <input type="radio" name="when" value="at">
+          At
+          <input type="datetime-local" id="when-at">
+        </label>
+        <p class="hint hidden" id="tz-note"></p>
+      </fieldset>
+
       <p class="hint">Leave unchecked to force apps closed. Unsaved work will be lost.</p>
       <menu>
         <button value="cancel">Cancel</button>

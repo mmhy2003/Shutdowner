@@ -17,7 +17,8 @@
   var state = {
     pending: null,     // { id, action, firesAtMs }
     firedAction: null, // the action whose countdown reached zero
-    failedPolls: 0
+    failedPolls: 0,
+    localTime: null
   };
 
   async function post(path, payload) {
@@ -57,6 +58,34 @@
     return "up " + m + "m";
   }
 
+  // The status endpoint reports the PC's time as RFC3339 with the PC's offset.
+  // Slicing the wall-clock part and appending "Z" gives a Date whose UTC fields
+  // hold the PC's reading, which makes date arithmetic possible without the
+  // browser's timezone ever being consulted.
+  function pcWallDate(iso) {
+    return new Date(iso.slice(0, 19) + "Z");
+  }
+
+  function pcWallInput(d) {
+    return d.toISOString().slice(0, 16);
+  }
+
+  function pcOffsetMinutes(iso) {
+    var m = /([+-])(\d{2}):(\d{2})$/.exec(iso);
+    if (!m) return 0;
+    var mins = parseInt(m[2], 10) * 60 + parseInt(m[3], 10);
+    return m[1] === "-" ? -mins : mins;
+  }
+
+  function formatWait(seconds) {
+    if (seconds < 60) return seconds + "s";
+    var mins = Math.round(seconds / 60);
+    if (mins < 60) return mins + "m";
+    var h = Math.floor(mins / 60);
+    var m = mins % 60;
+    return m === 0 ? h + "h" : h + "h " + m + "m";
+  }
+
   function formatClock(iso) {
     var t = new Date(iso);
     if (isNaN(t.getTime())) return "";
@@ -74,7 +103,15 @@
     box.classList.remove("hidden");
     var left = Math.max(0, Math.round((state.pending.firesAtMs - Date.now()) / 1000));
     var label = LABELS[state.pending.action] || state.pending.action;
-    el("pending-text").textContent = label + " in " + left + "s";
+    var text = label + " in " + formatWait(left);
+    // Past a minute the countdown alone stops being useful, so name the hour it
+    // lands on. The wall-clock characters are taken from the server's string as
+    // text: passing it through Date() would re-read it in the browser's
+    // timezone, which is the one thing the design rules out.
+    if (left >= 60 && state.pending.firesAtLocal) {
+      text += " · at " + state.pending.firesAtLocal.slice(11, 16);
+    }
+    el("pending-text").textContent = text;
     if (left === 0) state.firedAction = state.pending.action;
   }
 
@@ -85,6 +122,7 @@
     el("hostname").textContent = data.hostname;
     el("os").textContent = data.os;
     el("uptime").textContent = formatUptime(data.uptimeSeconds);
+    state.localTime = data.localTime;
     el("localtime").textContent = formatClock(data.localTime);
 
     document.querySelectorAll(".action").forEach(function (b) {
@@ -108,10 +146,22 @@
       state.pending = {
         id: data.pending.id,
         action: data.pending.action,
-        firesAtMs: Date.now() + data.pending.remainingSeconds * 1000
+        firesAtMs: Date.now() + data.pending.remainingSeconds * 1000,
+        firesAtLocal: data.pending.firesAtLocal
       };
     } else {
       state.pending = null;
+    }
+
+    var missed = el("missed");
+    if (data.missed) {
+      var mLabel = LABELS[data.missed.action] || data.missed.action;
+      el("missed-text").textContent =
+        mLabel + " was due at " + data.missed.wasDueAt.slice(11, 16) +
+        " and was skipped: the PC was off or asleep.";
+      missed.classList.remove("hidden");
+    } else {
+      missed.classList.add("hidden");
     }
 
     showError(data.state === "failed" ? data.error : "");
@@ -142,6 +192,67 @@
     }
   }
 
+  function selectedWhen() {
+    var checked = document.querySelector('input[name="when"]:checked');
+    return checked ? checked.value : "now";
+  }
+
+  // Reset to Now, bound the picker to the PC's clock, and say so when the phone
+  // holding the browser disagrees with the machine about what time it is.
+  function resetWhen() {
+    document.querySelector('input[name="when"][value="now"]').checked = true;
+    el("when-in-value").value = "1";
+    el("when-in-unit").value = "3600";
+    el("when-now-label").textContent =
+      defaultDelay > 0 ? "Now (" + defaultDelay + "s countdown)" : "Now";
+
+    var note = el("tz-note");
+    var at = el("when-at");
+    if (!state.localTime) {
+      at.value = "";
+      at.removeAttribute("min");
+      at.removeAttribute("max");
+      note.classList.add("hidden");
+      return;
+    }
+
+    var pcNow = pcWallDate(state.localTime);
+    at.min = pcWallInput(pcNow);
+    at.max = pcWallInput(new Date(pcNow.getTime() + 7 * 86400000));
+    at.value = pcWallInput(new Date(pcNow.getTime() + 3600000));
+
+    var pcOffset = pcOffsetMinutes(state.localTime);
+    var browserOffset = -new Date().getTimezoneOffset();
+    if (pcOffset === browserOffset) {
+      note.classList.add("hidden");
+      return;
+    }
+    var browserNow = new Date();
+    note.textContent =
+      "Times are the PC's clock, which reads " + at.min.slice(11) +
+      ". Your device reads " +
+      String(browserNow.getHours()).padStart(2, "0") + ":" +
+      String(browserNow.getMinutes()).padStart(2, "0") + ".";
+    note.classList.remove("hidden");
+  }
+
+  function whenPayload() {
+    switch (selectedWhen()) {
+      case "in":
+        var n = parseInt(el("when-in-value").value, 10);
+        if (!(n > 0)) throw new Error("Enter how long to wait.");
+        return { delaySeconds: n * parseInt(el("when-in-unit").value, 10) };
+      case "at":
+        var at = el("when-at").value;
+        if (!at) throw new Error("Pick a date and time.");
+        // The control emits seconds when the user types them; the server wants
+        // minute precision.
+        return { at: at.slice(0, 16) };
+      default:
+        return {};
+    }
+  }
+
   var dialog = el("confirm");
   var chosenAction = null;
 
@@ -149,9 +260,9 @@
     button.addEventListener("click", function () {
       chosenAction = button.dataset.action;
       var label = LABELS[chosenAction] || chosenAction;
-      var suffix = defaultDelay > 0 ? " this PC in " + defaultDelay + "s?" : " this PC?";
-      el("confirm-title").textContent = label + suffix;
+      el("confirm-title").textContent = label + " this PC?";
       el("graceful").checked = false;
+      resetWhen();
       // Browsers only began clearing returnValue on showModal() in 2023
       // (Chrome 119, Firefox 121, Safari 17.4). On anything older it persists,
       // so a previous "confirm" would still be there after dismissing this
@@ -167,12 +278,16 @@
     var force = !el("graceful").checked;
     try {
       showError("");
-      var data = await post("/api/action", { action: chosenAction, force: force });
+      var payload = whenPayload();
+      payload.action = chosenAction;
+      payload.force = force;
+      var data = await post("/api/action", payload);
       state.firedAction = null;
       state.pending = {
         id: data.id,
         action: chosenAction,
-        firesAtMs: Date.now() + data.remainingSeconds * 1000
+        firesAtMs: Date.now() + data.remainingSeconds * 1000,
+        firesAtLocal: data.firesAtLocal
       };
       render();
     } catch (e) {
@@ -188,6 +303,15 @@
       state.firedAction = null;
       showError("");
       render();
+    } catch (e) {
+      showError(e.message);
+    }
+  });
+
+  el("dismiss").addEventListener("click", async function () {
+    try {
+      await post("/api/dismiss", {});
+      el("missed").classList.add("hidden");
     } catch (e) {
       showError(e.message);
     }

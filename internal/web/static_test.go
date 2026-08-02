@@ -161,6 +161,30 @@ func TestEveryActionHasItsOwnColour(t *testing.T) {
 	}
 }
 
+// The dialog has to offer all three timings, and the missed banner has to exist
+// for app.js to fill in.
+func TestDashboardOffersTheWhenControls(t *testing.T) {
+	e := newTestEnv(t)
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.AddCookie(e.sessionCookie(t))
+
+	body := do(t, e.handler, r).Body.String()
+	for _, want := range []string{
+		`name="when" value="now"`,
+		`name="when" value="in"`,
+		`name="when" value="at"`,
+		`id="when-in-value"`,
+		`id="when-in-unit"`,
+		`id="when-at"`,
+		`id="missed"`,
+		`id="dismiss"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the dashboard is missing %s", want)
+		}
+	}
+}
+
 func TestMissingStaticAssetIs404(t *testing.T) {
 	e := newTestEnv(t)
 	res := do(t, e.handler, httptest.NewRequest(http.MethodGet, "/static/nope.css", nil))
