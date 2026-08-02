@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"shutdowner/internal/action"
@@ -118,6 +119,11 @@ func writeStarterEnv(path string) error {
 		return fmt.Errorf("generating a session secret: %w", err)
 	}
 	content := fmt.Sprintf(starterEnv, hex.EncodeToString(secret))
+	// 0600 is enforced on Unix only. On Windows the mode bits are effectively
+	// ignored and the file inherits the directory ACL, which under
+	// C:\Program Files\ grants BUILTIN\Users read — enough for any local account
+	// to read the session secret and forge a cookie. See "Security notes" in the
+	// README for the icacls command that fixes it.
 	return os.WriteFile(path, []byte(content), 0o600)
 }
 
@@ -145,15 +151,42 @@ func runHashPassword() error {
 	return nil
 }
 
+// serviceArgs re-emits the flags the installed service needs on its own command
+// line. Without this the service starts with a bare command line and cannot
+// find a .env the operator pointed at explicitly.
+func serviceArgs() ([]string, error) {
+	var args []string
+	if *flagConfig != "" {
+		// Absolute, because the service's working directory is
+		// C:\Windows\System32, not the directory the operator installed from.
+		abs, err := filepath.Abs(*flagConfig)
+		if err != nil {
+			return nil, fmt.Errorf("resolving --config path: %w", err)
+		}
+		args = append(args, "--config", abs)
+	}
+	if *flagAllowPublicBind {
+		args = append(args, "--allow-public-bind")
+	}
+	return args, nil
+}
+
 func runInstall() error {
 	exe, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	if err := winsvc.Install(exe); err != nil {
+	args, err := serviceArgs()
+	if err != nil {
 		return err
 	}
-	fmt.Printf("Installed and started the %s service.\n", winsvc.ServiceName)
+	if err := winsvc.Install(exe, args...); err != nil {
+		return err
+	}
+	// Echoing the registered command line is how the operator confirms that the
+	// --config they passed actually made it into the service.
+	fmt.Printf("Installed and started the %s service.\nCommand line: %s\n",
+		winsvc.ServiceName, strings.Join(append([]string{exe}, args...), " "))
 	return nil
 }
 
@@ -176,6 +209,18 @@ func runServer() error {
 		return err
 	}
 	defer closeLog()
+
+	if *flagAllowPublicBind {
+		// Both of these are consequences of design decisions that are correct
+		// for a loopback-only listener and wrong the moment it is not one.
+		logger.Warn("running with --allow-public-bind: the listener may be reachable without the tunnel",
+			"rateLimiting", "CF-Connecting-IP is trusted unconditionally, so a client that rotates that "+
+				"header never trips the per-IP limit of 5 and only the global ceiling of 20 per 15 minutes applies — "+
+				"which also locks the owner out for as long as an attack runs",
+			"sessionCookie", "the session cookie is Secure, and while browsers treat http://localhost and "+
+				"http://127.0.0.1 as secure contexts a plain-http LAN address such as http://192.168.1.5:8080 is not, "+
+				"so the cookie is dropped and login redirects in a loop")
+	}
 
 	var ctrl power.Controller = power.New()
 	if *flagFakePower {

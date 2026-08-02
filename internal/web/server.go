@@ -71,11 +71,13 @@ func (s *Server) Routes() http.Handler {
 	// "/{$}" matches only the root path; a bare "/" would swallow every 404.
 	mux.HandleFunc("GET /{$}", s.requireSession(s.handleDashboard))
 	mux.HandleFunc("GET /login", s.handleLoginForm)
-	mux.HandleFunc("POST /login", s.handleLoginSubmit)
-	mux.HandleFunc("POST /logout", s.requireSession(s.requireCSRF(s.handleLogout)))
+	// limitBody is the outermost wrapper on every POST, so no handler and no
+	// middleware that touches the body can be reached without a cap.
+	mux.HandleFunc("POST /login", limitBody(maxRequestBody, s.handleLoginSubmit))
+	mux.HandleFunc("POST /logout", limitBody(maxRequestBody, s.requireSession(s.requireCSRF(s.handleLogout))))
 	mux.HandleFunc("GET /api/status", s.requireSession(s.handleStatus))
-	mux.HandleFunc("POST /api/action", s.requireSession(s.requireCSRF(s.handleAction)))
-	mux.HandleFunc("POST /api/abort", s.requireSession(s.requireCSRF(s.handleAbort)))
+	mux.HandleFunc("POST /api/action", limitBody(maxRequestBody, s.requireSession(s.requireCSRF(s.handleAction))))
+	mux.HandleFunc("POST /api/abort", limitBody(maxRequestBody, s.requireSession(s.requireCSRF(s.handleAbort))))
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.Handle("GET /static/", s.static)
 	return securityHeaders(recoverPanic(s.logger, mux))

@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -159,7 +160,7 @@ func (m *Manager) fire(id string) {
 	a, force := m.action, m.force
 	m.mu.Unlock()
 
-	err := m.ctrl.Execute(context.Background(), a, force)
+	err := m.execute(a, force)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -174,6 +175,25 @@ func (m *Manager) fire(id string) {
 	// never reach here at all: the process dies mid-call.
 	m.state = StateIdle
 	m.lastErr = ""
+}
+
+// execute runs the controller and turns a panic into an ordinary error. This
+// runs on the time.AfterFunc goroutine, outside the HTTP server's recoverPanic
+// middleware, so an unrecovered panic here takes the whole process down — and
+// the Windows power path can panic: LazyProc.Call panics via mustFind() when
+// powrprof.dll or one of its exports cannot be resolved, which both
+// SetSuspendState and GetPwrCapabilities go through.
+//
+// The panic value is the message, without the stack: it reaches the UI through
+// Status().Error, and mustFind's own text already names the missing DLL or
+// export.
+func (m *Manager) execute(a power.Action, force bool) (err error) {
+	defer func() {
+		if v := recover(); v != nil {
+			err = fmt.Errorf("the power action panicked: %v", v)
+		}
+	}()
+	return m.ctrl.Execute(context.Background(), a, force)
 }
 
 // Abort cancels the pending action when id matches it, so a stale browser tab

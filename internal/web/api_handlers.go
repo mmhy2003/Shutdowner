@@ -11,11 +11,6 @@ import (
 	"shutdowner/internal/sysinfo"
 )
 
-// maxRequestBody bounds the JSON these endpoints will read. Both payloads are
-// a few dozen bytes; anything larger is a mistake or an attack, and decoding it
-// would allocate without limit.
-const maxRequestBody = 4 << 10 // 4 KiB
-
 type dashboardPage struct {
 	Info         sysinfo.Info
 	Capabilities power.Capabilities
@@ -81,8 +76,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleAction relies on the limitBody middleware for its body cap; an
+// oversized body surfaces here as a decode error.
 func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 	var req actionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "malformed request body")
@@ -113,7 +109,6 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAbort(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 	var req abortRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "malformed request body")

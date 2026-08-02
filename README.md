@@ -21,7 +21,9 @@ make test               # runs the suite on any platform
 
 1. Copy `shutdowner.exe` to `C:\Program Files\Shutdowner\`.
 2. Open an **elevated** Command Prompt in that directory.
-3. `shutdowner.exe --init` — writes `.env` with a fresh session secret.
+3. `shutdowner.exe --init` — writes `.env` with a fresh session secret. If the PC
+   has other user accounts, also restrict the file's ACL — see
+   [`.env` file permissions on Windows](#env-file-permissions-on-windows).
 4. `shutdowner.exe --hash-password` — type a long password twice, then paste the
    printed line into `.env` as `SHUTDOWNER_PASSWORD_HASH='<hash>'`.
 5. `shutdowner.exe --install-service` — installs, sets auto-start and
@@ -35,9 +37,11 @@ To remove it: `shutdowner.exe --uninstall-service`.
 
 `.env` lives beside the executable. Paths are resolved from the executable's
 location, never the working directory, because a service starts in
-`C:\Windows\System32`. Values in `.env` must be single-quoted, because the
-file is read with godotenv, which otherwise expands `$VAR` in unquoted
-values — and a bcrypt hash is mostly dollar signs.
+`C:\Windows\System32`. Any value that may contain a `$` must be single-quoted —
+in practice the password hash and the session secret. The file is read with
+godotenv, which expands `$VAR` in unquoted values, and a bcrypt hash is mostly
+dollar signs. The remaining values contain no `$` and are left unquoted in
+`.env.example`.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -60,6 +64,31 @@ shutdowner.exe --console            run in the foreground, log to stdout
 shutdowner.exe --config PATH        alternate .env location
 shutdowner.exe --allow-public-bind  permit a non-loopback listen address
 shutdowner.exe --fake-power         development only: log actions, do not execute
+```
+
+`--install-service` passes `--config` and `--allow-public-bind` through to the
+installed service's command line, with `--config` made absolute. Any other flag
+is not forwarded.
+
+`--allow-public-bind` weakens two things that are only safe on a loopback
+listener, and the app logs a warning at startup saying so. Rate limiting counts
+`CF-Connecting-IP` unconditionally, so a client that rotates that header never
+trips the per-IP limit of 5 and faces only the global ceiling of 20 per 15
+minutes — which also locks you out for as long as the attack runs. And the
+session cookie is `Secure`: browsers count `http://localhost` and
+`http://127.0.0.1` as secure contexts, but a plain-http LAN address such as
+`http://192.168.1.5:8080` is not, so the browser discards the cookie and login
+redirects in a loop. Put a TLS terminator in front if you need this flag.
+
+## Development
+
+`make run-dev` expects a `./.env.dev`, which is gitignored and is not created for
+you:
+
+```
+go run ./cmd/shutdowner --init --config ./.env.dev
+go run ./cmd/shutdowner --hash-password    # paste the printed line into .env.dev
+make run-dev
 ```
 
 ## How it behaves
@@ -85,6 +114,24 @@ shutdowner.exe --fake-power         development only: log actions, do not execut
   exists to perform.
 - Five failed logins per IP per 15 minutes, and 20 globally, then HTTP 429.
 - The listener refuses a non-loopback address unless you explicitly opt in.
+
+### `.env` file permissions on Windows
+
+`--init` writes `.env` with mode `0600`, and that has **no effect on Windows**.
+The mode bits are ignored; the file inherits the directory's ACL, and the
+documented install location `C:\Program Files\Shutdowner\` grants
+`BUILTIN\Users` read access by default. So `.env` is readable by every local
+account on the PC — and it holds `SHUTDOWNER_SESSION_SECRET`, which is on its
+own enough to forge a valid session cookie and skip the password entirely.
+
+Restrict it after `--init`, from an elevated prompt:
+
+```
+icacls "C:\Program Files\Shutdowner\.env" /inheritance:r /grant:r "SYSTEM:(R)" "Administrators:(R)"
+```
+
+This matters only if the PC has user accounts other than your own; on a
+single-account machine the local reader and the owner are the same person.
 
 ## Verifying a real install
 

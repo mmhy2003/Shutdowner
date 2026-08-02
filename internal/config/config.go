@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // Defaults applied when a key is absent.
@@ -49,6 +50,13 @@ func Parse(env map[string]string, allowPublicBind bool) (*Config, error) {
 		return nil, errors.New("SHUTDOWNER_PASSWORD_HASH is not a bcrypt hash; generate one with " +
 			"--hash-password and keep the single quotes around it, since an unquoted value has its " +
 			"$ sequences stripped")
+	}
+	// The shape check accepts any two-digit cost, including ones bcrypt itself
+	// refuses at verification time. Without this, a hash like $2a$99$... starts
+	// the app cleanly and then rejects every password forever.
+	if _, err := bcrypt.Cost([]byte(c.PasswordHash)); err != nil {
+		return nil, fmt.Errorf("SHUTDOWNER_PASSWORD_HASH has a cost bcrypt will not accept, so no password "+
+			"could ever verify against it; generate a new one with --hash-password: %w", err)
 	}
 
 	rawSecret := env["SHUTDOWNER_SESSION_SECRET"]

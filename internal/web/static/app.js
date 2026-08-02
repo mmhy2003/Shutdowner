@@ -152,6 +152,11 @@
       var suffix = defaultDelay > 0 ? " this PC in " + defaultDelay + "s?" : " this PC?";
       el("confirm-title").textContent = label + suffix;
       el("graceful").checked = false;
+      // Browsers only began clearing returnValue on showModal() in 2023
+      // (Chrome 119, Firefox 121, Safari 17.4). On anything older it persists,
+      // so a previous "confirm" would still be there after dismissing this
+      // dialog with Escape — scheduling a forced shutdown nobody confirmed.
+      dialog.returnValue = "";
       dialog.showModal();
     });
   });

@@ -27,6 +27,23 @@ func securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
+// maxRequestBody bounds what any handler will read from a request body. Every
+// payload this app accepts is a few dozen bytes; anything larger is a mistake or
+// an attack, and reading it would allocate without limit.
+const maxRequestBody = 4 << 10 // 4 KiB
+
+// limitBody caps how much of a request body any handler can read. Applied to
+// every state-changing route rather than per handler, because the one endpoint
+// that was missed when this was done by hand — login — was also the only
+// unauthenticated one. It wraps outside requireCSRF too, since r.FormValue on a
+// multipart body would otherwise buffer up to ParseMultipartForm's 32 MB.
+func limitBody(n int64, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, n)
+		next(w, r)
+	}
+}
+
 func recoverPanic(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {

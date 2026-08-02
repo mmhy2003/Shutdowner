@@ -87,12 +87,17 @@ path would look in the wrong place and silently fall back to defaults.
 `.env` holds a bcrypt hash at cost 12:
 
 ```
-SHUTDOWNER_PASSWORD_HASH=$2a$12$...
+SHUTDOWNER_PASSWORD_HASH='$2a$12$...'
 ```
 
-`shutdowner.exe --hash-password` prompts without echo and prints the line to
-paste. Startup fails if the value is absent or is not a well-formed bcrypt hash,
-so there is no configuration that silently disables auth.
+The single quotes are load-bearing. `.env` is read with godotenv, which expands
+`$VAR` in unquoted and double-quoted values — and a bcrypt hash is mostly dollar
+signs, so an unquoted hash is silently destroyed on load.
+
+`shutdowner.exe --hash-password` prompts without echo and prints the line,
+already quoted, to paste. Startup fails if the value is absent, is not a
+well-formed bcrypt hash, or carries a cost `bcrypt` will refuse at verification
+time, so there is no configuration that silently disables auth.
 
 Hashing does not defend against someone who can already read `.env` — that
 person owns the machine. It defends against the leak paths that actually occur:
@@ -261,9 +266,12 @@ hibernate use the API directly because the widespread
 `rundll32 powrprof.dll,SetSuspendState 0,1,0` form hibernates instead of sleeping
 whenever hibernation is enabled, and so cannot distinguish the two actions.
 
-Capabilities come from `GetPwrCapabilities` in `powrprof.dll`, reading
-`SystemS3` and `HiberFilePresent`. `powercfg /a` is rejected because its output
-is localized and parsing it breaks on non-English installs.
+Capabilities come from `GetPwrCapabilities` in `powrprof.dll`. Sleep is
+reported from `SystemS3`; hibernate requires both `SystemS4` and
+`HiberFilePresent`, since the S4 state being supported means nothing if the
+hibernation file has been removed by `powercfg /h off`. `powercfg /a` is
+rejected because its output is localized and parsing it breaks on non-English
+installs.
 
 Argument construction is a pure, exported-for-test function:
 
@@ -399,8 +407,12 @@ shutdowner.exe --fake-power         development only; log actions, do not execut
 
 - **Startup failures** exit non-zero and write to both the log file and the
   Windows Event Log. A service that dies silently at boot is otherwise invisible.
-- **Panics** are caught by recovery middleware, logged with the stack, and
-  returned as 500.
+- **Panics** in an HTTP handler are caught by recovery middleware, logged with
+  the stack, and returned as 500. The action manager's timer goroutine runs
+  outside that middleware and recovers separately, routing the panic into the
+  `Failed` state so it surfaces in the UI rather than killing the process —
+  `LazyProc.Call` panics if a DLL export cannot be resolved, so this is the one
+  non-HTTP path that can realistically panic.
 - **Login failure** returns a single generic message. There are no usernames, so
   enumeration is not a concern, but the message stays uniform regardless of cause.
 - **Rate limited** returns 429 with `Retry-After`; the UI shows when to retry.
@@ -449,7 +461,7 @@ whole suite runs in well under a second with no real waiting.
 
 ### Not covered by automated tests
 
-The Win32 calls in `power/windows.go`, `sysinfo/windows.go`, and the service
+The Win32 calls in `power/windows.go`, `sysinfo/sysinfo_windows.go`, and the service
 wrapper in `winsvc`. These stay deliberately thin, with all branching logic
 extracted into the pure functions listed above. They are covered by a manual
 checklist run on the target PC:

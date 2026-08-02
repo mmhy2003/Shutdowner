@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -36,7 +37,7 @@ func TestWriteStarterEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 	if perm := info.Mode().Perm(); perm != 0o600 {
-		t.Errorf("permissions = %o, want 600 — the file holds a session secret", perm)
+		t.Errorf("permissions = %o, want 600 — note this is only enforced on Unix; see the README on Windows ACLs", perm)
 	}
 }
 
@@ -82,6 +83,72 @@ func TestGeneratedEnvParsesOnceAHashIsAdded(t *testing.T) {
 
 	if _, err := config.Parse(env, false); err != nil {
 		t.Errorf("config.Parse() on the generated .env error = %v, want nil", err)
+	}
+}
+
+// withFlags sets the package-level flags for one test and restores them, since
+// they are process-wide state shared with every other test in this package.
+func withFlags(t *testing.T, cfg string, allowPublicBind bool) {
+	t.Helper()
+	oldConfig, oldBind := *flagConfig, *flagAllowPublicBind
+	t.Cleanup(func() {
+		*flagConfig, *flagAllowPublicBind = oldConfig, oldBind
+	})
+	*flagConfig, *flagAllowPublicBind = cfg, allowPublicBind
+}
+
+func TestServiceArgsAreEmptyWithNoFlags(t *testing.T) {
+	withFlags(t, "", false)
+	args, err := serviceArgs()
+	if err != nil {
+		t.Fatalf("serviceArgs() error = %v", err)
+	}
+	if len(args) != 0 {
+		t.Errorf("args = %v, want none when no flags were passed", args)
+	}
+}
+
+func TestServiceArgsMakeConfigAbsolute(t *testing.T) {
+	// A relative path is exactly the case that breaks: the service starts in
+	// C:\Windows\System32, so it would resolve against the wrong directory.
+	withFlags(t, filepath.Join("cfg", ".env"), false)
+
+	args, err := serviceArgs()
+	if err != nil {
+		t.Fatalf("serviceArgs() error = %v", err)
+	}
+	if len(args) != 2 || args[0] != "--config" {
+		t.Fatalf("args = %v, want [--config <path>]", args)
+	}
+	if !filepath.IsAbs(args[1]) {
+		t.Errorf("--config = %q, want an absolute path", args[1])
+	}
+	want, err := filepath.Abs(filepath.Join("cfg", ".env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if args[1] != want {
+		t.Errorf("--config = %q, want %q", args[1], want)
+	}
+}
+
+func TestServiceArgsIncludeAllowPublicBindOnlyWhenSet(t *testing.T) {
+	withFlags(t, "", false)
+	args, err := serviceArgs()
+	if err != nil {
+		t.Fatalf("serviceArgs() error = %v", err)
+	}
+	if slices.Contains(args, "--allow-public-bind") {
+		t.Errorf("args = %v, want no --allow-public-bind when the flag is unset", args)
+	}
+
+	withFlags(t, "", true)
+	args, err = serviceArgs()
+	if err != nil {
+		t.Fatalf("serviceArgs() error = %v", err)
+	}
+	if !slices.Contains(args, "--allow-public-bind") {
+		t.Errorf("args = %v, want --allow-public-bind forwarded when the flag is set", args)
 	}
 }
 

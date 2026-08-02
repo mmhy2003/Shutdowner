@@ -3,6 +3,7 @@ package action
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -288,6 +289,50 @@ func (b *blockingController) Execute(context.Context, power.Action, bool) error 
 
 func (b *blockingController) Capabilities(context.Context) (power.Capabilities, error) {
 	return power.Capabilities{Sleep: true, Hibernate: true}, nil
+}
+
+// panickingController stands in for the Windows power path, where
+// LazyProc.Call panics if a DLL export cannot be resolved.
+type panickingController struct{}
+
+func (panickingController) Execute(context.Context, power.Action, bool) error {
+	panic("Failed to find SetSuspendState procedure in powrprof.dll")
+}
+
+func (panickingController) Capabilities(context.Context) (power.Capabilities, error) {
+	return power.Capabilities{Sleep: true, Hibernate: true}, nil
+}
+
+func TestAPanicDuringExecutionBecomesAFailure(t *testing.T) {
+	var timer *manualTimer
+	m := New(panickingController{}, 45*time.Second, WithAfterFunc(func(_ time.Duration, fn func()) Timer {
+		timer = &manualTimer{fn: fn}
+		return timer
+	}))
+
+	if _, err := m.Schedule(context.Background(), power.ActionShutdown, true); err != nil {
+		t.Fatalf("Schedule() error = %v", err)
+	}
+
+	// The process must survive this: firing happens on the timer goroutine,
+	// outside the HTTP server's recoverPanic middleware.
+	timer.fn()
+
+	s := m.Status()
+	if s.State != StateFailed {
+		t.Fatalf("State = %q, want failed after a panicking Execute", s.State)
+	}
+	if s.Error == "" {
+		t.Error("Status().Error is empty, so the panic is invisible in the UI")
+	}
+	if !strings.Contains(s.Error, "powrprof.dll") {
+		t.Errorf("Error = %q, want it to name the panic", s.Error)
+	}
+
+	// And the manager must still be usable rather than wedged in executing.
+	if _, err := m.Schedule(context.Background(), power.ActionRestart, true); err != nil {
+		t.Errorf("Schedule() after a panic error = %v, want nil", err)
+	}
 }
 
 func TestScheduleRejectedWhileExecuting(t *testing.T) {

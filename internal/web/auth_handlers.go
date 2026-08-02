@@ -39,13 +39,19 @@ func (s *Server) handleLoginForm(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 	ip := ClientIP(r)
 
-	// The limiter gates before verification, so a locked-out client cannot use
-	// timing against the bcrypt comparison.
+	// The limiter gates before verification so that a locked-out client never
+	// reaches the bcrypt comparison at all: at cost 12 that is ~100ms of CPU per
+	// attempt, which is a denial-of-service lever if it can be driven freely.
 	if ok, retry := s.limiter.Allow(ip); !ok {
 		w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())+1))
 		s.logger.Warn("login rate limited", "ip", ip)
+		minutes := int(retry.Minutes()) + 1
+		unit := "minutes"
+		if minutes == 1 {
+			unit = "minute"
+		}
 		s.renderLogin(w, http.StatusTooManyRequests,
-			fmt.Sprintf("Too many failed attempts. Try again in %d minutes.", int(retry.Minutes())+1))
+			fmt.Sprintf("Too many failed attempts. Try again in %d %s.", minutes, unit))
 		return
 	}
 

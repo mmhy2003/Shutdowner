@@ -76,6 +76,14 @@ func TestParseRejectsBadInput(t *testing.T) {
 	}{
 		{"missing hash", func(e map[string]string) { delete(e, "SHUTDOWNER_PASSWORD_HASH") }, "SHUTDOWNER_PASSWORD_HASH is required"},
 		{"malformed hash", func(e map[string]string) { e["SHUTDOWNER_PASSWORD_HASH"] = "hunter2" }, "not a bcrypt hash"},
+		// The shape regex accepts any two digits, but bcrypt only accepts 4-31.
+		// Either of these would start the app and then reject every password.
+		{"cost too high", func(e map[string]string) {
+			e["SHUTDOWNER_PASSWORD_HASH"] = "$2a$99$" + strings.Repeat("a", 53)
+		}, "cost bcrypt will not accept"},
+		{"cost too low", func(e map[string]string) {
+			e["SHUTDOWNER_PASSWORD_HASH"] = "$2a$02$" + strings.Repeat("a", 53)
+		}, "cost bcrypt will not accept"},
 		{"missing secret", func(e map[string]string) { delete(e, "SHUTDOWNER_SESSION_SECRET") }, "SHUTDOWNER_SESSION_SECRET is required"},
 		{"non-hex secret", func(e map[string]string) { e["SHUTDOWNER_SESSION_SECRET"] = "zzzz" }, "must be hex"},
 		{"short secret", func(e map[string]string) { e["SHUTDOWNER_SESSION_SECRET"] = strings.Repeat("ab", 8) }, "at least 32 bytes"},
@@ -170,7 +178,13 @@ func TestLoadRejectsAnUnquotedHash(t *testing.T) {
 
 	// It must fail loudly at startup rather than silently accepting a
 	// mangled hash that can never verify.
-	if _, err := Load(path, false); err == nil {
+	_, err = Load(path, false)
+	if err == nil {
 		t.Fatal("Load() error = nil, want a failure for an unquoted hash")
+	}
+	// Asserting the reason, not just that something failed: this is the one bug
+	// that actually shipped, and any other error here would mask it.
+	if !strings.Contains(err.Error(), "not a bcrypt hash") {
+		t.Errorf("Load() error = %q, want it to say the value is not a bcrypt hash", err)
 	}
 }

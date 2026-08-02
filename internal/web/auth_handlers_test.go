@@ -6,6 +6,9 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
+
+	"shutdowner/internal/auth"
 )
 
 func postForm(t *testing.T, h http.Handler, path string, form url.Values, setup func(*http.Request)) *httptest.ResponseRecorder {
@@ -184,6 +187,48 @@ func TestLoginIsExemptFromCSRF(t *testing.T) {
 	res := postForm(t, e.handler, "/login", url.Values{"password": {testPassword}}, nil)
 	if res.Code != http.StatusFound {
 		t.Errorf("status = %d, want 302", res.Code)
+	}
+}
+
+func TestRateLimitMessageIsSingularForOneMinute(t *testing.T) {
+	e := newTestEnv(t)
+	// A window under a minute makes the remaining time round to 1, which is the
+	// only case where the plural is wrong.
+	e.srv.limiter = auth.NewLimiter(1, auth.DefaultGlobalLimit, 30*time.Second)
+	setIP := func(r *http.Request) { r.Header.Set("CF-Connecting-IP", "203.0.113.8") }
+
+	postForm(t, e.handler, "/login", url.Values{"password": {"wrong"}}, setIP)
+	res := postForm(t, e.handler, "/login", url.Values{"password": {"wrong"}}, setIP)
+
+	if res.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", res.Code)
+	}
+	if body := res.Body.String(); !strings.Contains(body, "in 1 minute.") || strings.Contains(body, "in 1 minutes.") {
+		t.Error(`the rate-limit message says "1 minutes"`)
+	}
+}
+
+func TestOversizedLoginBodyIsRejected(t *testing.T) {
+	e := newTestEnv(t)
+
+	form := url.Values{"password": {testPassword + strings.Repeat("x", 16<<10)}}
+	res := postForm(t, e.handler, "/login", form, nil)
+
+	// http.MaxBytesReader makes ParseForm fail, which the handler reports as a
+	// failed login rather than buffering megabytes first.
+	if res.Code == http.StatusFound {
+		t.Error("an oversized login body was accepted")
+	}
+	if findCookie(res, SessionCookieName) != nil {
+		t.Error("an oversized login body issued a session cookie")
+	}
+	// This is the assertion that distinguishes a capped body from an uncapped
+	// one. Uncapped, ParseForm happily buffers 16 KiB (its own limit is 10 MB),
+	// the password comparison is reached, and the answer is 401. Capped,
+	// ParseForm fails first and the handler answers 400 — so a 401 here means
+	// the cap is gone.
+	if res.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 — the body cap must fail ParseForm before the password is compared", res.Code)
 	}
 }
 
