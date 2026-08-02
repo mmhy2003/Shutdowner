@@ -1,9 +1,13 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 // A syntactically valid bcrypt hash. Its plaintext is irrelevant here: Parse
@@ -114,5 +118,59 @@ func TestParseAllowsPublicBindWhenOptedIn(t *testing.T) {
 	env["SHUTDOWNER_LISTEN"] = "0.0.0.0:8080"
 	if _, err := Parse(env, true); err != nil {
 		t.Errorf("Parse() with allowPublicBind error = %v, want nil", err)
+	}
+}
+
+func TestLoadReadsARealBcryptHashFromDisk(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".env")
+
+	// A real hash at minimum cost — the point is the dollar signs, not the work factor.
+	hashed, err := bcrypt.GenerateFromPassword([]byte("correct horse battery staple"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("GenerateFromPassword() error = %v", err)
+	}
+	hash := string(hashed)
+
+	// Single-quoted, exactly as --hash-password emits it. Unquoted, godotenv
+	// expands the $2a/$NN sequences and silently destroys the hash.
+	body := "SHUTDOWNER_PASSWORD_HASH='" + hash + "'\n" +
+		"SHUTDOWNER_SESSION_SECRET='" + strings.Repeat("ab", 32) + "'\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path, false)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.PasswordHash != hash {
+		t.Errorf("PasswordHash = %q, want %q — the file parser altered it", cfg.PasswordHash, hash)
+	}
+	if bcrypt.CompareHashAndPassword([]byte(cfg.PasswordHash), []byte("correct horse battery staple")) != nil {
+		t.Error("the hash loaded from disk no longer verifies the password it was made from")
+	}
+}
+
+func TestLoadRejectsAnUnquotedHash(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".env")
+
+	hashed, err := bcrypt.GenerateFromPassword([]byte("correct horse battery staple"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("GenerateFromPassword() error = %v", err)
+	}
+
+	// The mistake this guards against: pasting the hash without quotes.
+	body := "SHUTDOWNER_PASSWORD_HASH=" + string(hashed) + "\n" +
+		"SHUTDOWNER_SESSION_SECRET='" + strings.Repeat("ab", 32) + "'\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// It must fail loudly at startup rather than silently accepting a
+	// mangled hash that can never verify.
+	if _, err := Load(path, false); err == nil {
+		t.Fatal("Load() error = nil, want a failure for an unquoted hash")
 	}
 }

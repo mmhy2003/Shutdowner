@@ -46,7 +46,9 @@ func Parse(env map[string]string, allowPublicBind bool) (*Config, error) {
 		return nil, errors.New("SHUTDOWNER_PASSWORD_HASH is required; generate one with --hash-password")
 	}
 	if !bcryptShape.MatchString(c.PasswordHash) {
-		return nil, errors.New("SHUTDOWNER_PASSWORD_HASH is not a bcrypt hash; generate one with --hash-password")
+		return nil, errors.New("SHUTDOWNER_PASSWORD_HASH is not a bcrypt hash; generate one with " +
+			"--hash-password and keep the single quotes around it, since an unquoted value has its " +
+			"$ sequences stripped")
 	}
 
 	rawSecret := env["SHUTDOWNER_SESSION_SECRET"]

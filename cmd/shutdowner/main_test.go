@@ -12,7 +12,7 @@ import (
 	"shutdowner/internal/config"
 )
 
-var secretPattern = regexp.MustCompile(`SHUTDOWNER_SESSION_SECRET=([0-9a-f]{64})`)
+var secretPattern = regexp.MustCompile(`SHUTDOWNER_SESSION_SECRET='([0-9a-f]{64})'`)
 
 func TestWriteStarterEnv(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".env")

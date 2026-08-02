@@ -23,7 +23,7 @@ make test               # runs the suite on any platform
 2. Open an **elevated** Command Prompt in that directory.
 3. `shutdowner.exe --init` — writes `.env` with a fresh session secret.
 4. `shutdowner.exe --hash-password` — type a long password twice, then paste the
-   printed line into `.env` as `SHUTDOWNER_PASSWORD_HASH`.
+   printed line into `.env` as `SHUTDOWNER_PASSWORD_HASH='<hash>'`.
 5. `shutdowner.exe --install-service` — installs, sets auto-start and
    restart-on-failure, and starts the service.
 6. Install [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/),
@@ -35,7 +35,9 @@ To remove it: `shutdowner.exe --uninstall-service`.
 
 `.env` lives beside the executable. Paths are resolved from the executable's
 location, never the working directory, because a service starts in
-`C:\Windows\System32`.
+`C:\Windows\System32`. Values in `.env` must be single-quoted, because the
+file is read with godotenv, which otherwise expands `$VAR` in unquoted
+values — and a bcrypt hash is mostly dollar signs.
 
 | Key | Default | Meaning |
 |---|---|---|
