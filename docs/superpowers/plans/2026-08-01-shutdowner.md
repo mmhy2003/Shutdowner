@@ -1517,7 +1517,7 @@ git add internal/power/
 git commit -m "feat: power controller interface, argument builder and fake"
 ```
 
-Note: `GOOS=windows go build ./...` fails at this point because `systemController` has no Windows implementation yet. That is expected and fixed by Task 7, which is why the Windows build check is omitted from this commit only.
+Note: `GOOS=windows GOARCH=amd64 go build ./...` succeeds here, despite there being no Windows `systemController` yet. On a Windows target `unsupported.go` is excluded by its build tag, leaving a `power` package that simply has no `New` — and since nothing calls `power.New()` until Task 16 wires it, there is no dangling reference to fail on. The normal both-builds-green constraint therefore applies to this task like any other.
 
 ---
 
@@ -1532,10 +1532,10 @@ Note: `GOOS=windows go build ./...` fails at this point because `systemControlle
 
 This task has no unit tests: it is a thin wrapper over syscalls that cannot execute here. Its verification is that it compiles and vets clean for Windows, and it is covered by items 4-7 of the manual checklist in Task 16.
 
-- [ ] **Step 1: Confirm the Windows build currently fails**
+- [ ] **Step 1: Confirm the Windows target currently has no controller**
 
-Run: `GOOS=windows GOARCH=amd64 go build ./...`
-Expected: FAIL — `undefined: systemController` in package `shutdowner/internal/power`.
+Run: `GOOS=windows GOARCH=amd64 go doc shutdowner/internal/power New`
+Expected: an error reporting no symbol `New` — the Windows build of the package compiles but exposes no constructor, which is exactly the gap this task fills.
 
 - [ ] **Step 2: Write the implementation**
 
