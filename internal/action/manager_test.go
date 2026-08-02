@@ -404,3 +404,80 @@ func TestScheduleRejectedWhileExecuting(t *testing.T) {
 	}
 	close(ctrl.release)
 }
+
+func TestADeadlineWithinTheGraceWindowStillFires(t *testing.T) {
+	h := newHarness(t)
+	if _, err := h.schedule(t, power.ActionShutdown, true, time.Hour); err != nil {
+		t.Fatalf("Schedule() error = %v", err)
+	}
+
+	// The machine was busy, or suspended briefly, and the tick lands late.
+	h.advance(time.Hour + 4*time.Minute)
+
+	if len(h.fake.Calls()) != 1 {
+		t.Errorf("Calls() = %+v, want the action to have fired", h.fake.Calls())
+	}
+}
+
+func TestADeadlineBeyondTheGraceWindowIsMissed(t *testing.T) {
+	h := newHarness(t)
+	if _, err := h.schedule(t, power.ActionSleep, false, time.Hour); err != nil {
+		t.Fatalf("Schedule() error = %v", err)
+	}
+
+	// The machine was asleep across the deadline and resumed hours later.
+	h.advance(6 * time.Hour)
+
+	if len(h.fake.Calls()) != 0 {
+		t.Fatal("a missed action was executed; the machine would suspend on resume")
+	}
+	s := h.mgr.Status()
+	if s.State != StateMissed {
+		t.Fatalf("State = %q, want missed", s.State)
+	}
+	if s.Missed == nil {
+		t.Fatal("Status().Missed = nil, want the skipped action reported")
+	}
+	if s.Missed.Action != power.ActionSleep {
+		t.Errorf("Missed.Action = %q, want sleep", s.Missed.Action)
+	}
+	if s.Pending != nil {
+		t.Error("Status().Pending is set for a missed action")
+	}
+}
+
+func TestMissedIsSchedulable(t *testing.T) {
+	h := newHarness(t)
+	if _, err := h.schedule(t, power.ActionSleep, false, time.Hour); err != nil {
+		t.Fatalf("Schedule() error = %v", err)
+	}
+	h.advance(6 * time.Hour)
+	if h.mgr.Status().State != StateMissed {
+		t.Fatal("setup: expected a missed action")
+	}
+
+	// A skipped action must not leave the machine unable to accept the next one.
+	if _, err := h.schedule(t, power.ActionShutdown, true, time.Minute); err != nil {
+		t.Fatalf("Schedule() after a miss error = %v, want nil", err)
+	}
+	if s := h.mgr.Status(); s.Missed != nil {
+		t.Error("scheduling a new action did not clear the missed record")
+	}
+}
+
+func TestDismissClearsAMissedRecord(t *testing.T) {
+	h := newHarness(t)
+	if _, err := h.schedule(t, power.ActionSleep, false, time.Hour); err != nil {
+		t.Fatalf("Schedule() error = %v", err)
+	}
+	h.advance(6 * time.Hour)
+
+	h.mgr.Dismiss()
+
+	s := h.mgr.Status()
+	if s.State != StateIdle || s.Missed != nil {
+		t.Errorf("Status() = %+v, want idle with no missed record", s)
+	}
+	// Idempotent: a second tab racing the first must not produce an error.
+	h.mgr.Dismiss()
+}

@@ -21,11 +21,21 @@ const (
 	StatePending   State = "pending"
 	StateExecuting State = "executing"
 	StateFailed    State = "failed"
+	StateMissed    State = "missed"
 )
 
 // FailedRetention is how long a failure is reported before the manager returns
 // to idle on its own, so no dismissal endpoint is needed.
 const FailedRetention = 60 * time.Second
+
+// MissedGrace is how far past its deadline an action may still fire. Beyond it
+// the action is skipped and reported instead.
+//
+// The window exists because a deadline can go by while nothing is watching: the
+// service was stopped, or Windows suspended the machine. Executing on the way
+// back would mean shutting the PC down moments after somebody deliberately
+// woke it, which is the worst outcome available here.
+const MissedGrace = 5 * time.Minute
 
 // TickInterval is how often the manager compares now against the deadline. A
 // tick is a mutex acquisition and a time comparison, so the cost is nothing
@@ -52,9 +62,16 @@ type Pending struct {
 	FiresAtLocal string `json:"firesAtLocal"`
 }
 
+// Missed records an action whose deadline went by unobserved.
+type Missed struct {
+	Action   power.Action `json:"action"`
+	WasDueAt string       `json:"wasDueAt"`
+}
+
 type Status struct {
 	State   State    `json:"state"`
 	Pending *Pending `json:"pending"`
+	Missed  *Missed  `json:"missed"`
 	Error   string   `json:"error"`
 }
 
@@ -91,6 +108,7 @@ type Manager struct {
 	firesAt  time.Time
 	lastErr  string
 	failedAt time.Time
+	missed   *Missed
 }
 
 func New(ctrl power.Controller, opts ...Option) *Manager {
@@ -126,6 +144,7 @@ func (m *Manager) Schedule(ctx context.Context, a power.Action, force bool, fire
 	if m.state == StatePending || m.state == StateExecuting {
 		return Pending{}, ErrConflict
 	}
+	m.missed = nil
 
 	m.state = StatePending
 	m.id = m.newID()
@@ -145,7 +164,17 @@ func (m *Manager) Schedule(ctx context.Context, a power.Action, force bool, fire
 // no arguments and reads the clock itself.
 func (m *Manager) Tick() {
 	m.mu.Lock()
-	if m.state != StatePending || m.now().Before(m.firesAt) {
+	if m.state != StatePending {
+		m.mu.Unlock()
+		return
+	}
+	now := m.now()
+	if now.Before(m.firesAt) {
+		m.mu.Unlock()
+		return
+	}
+	if now.Sub(m.firesAt) > MissedGrace {
+		m.missLocked()
 		m.mu.Unlock()
 		return
 	}
@@ -235,12 +264,30 @@ func (m *Manager) Abort(id string) error {
 	return nil
 }
 
+// missLocked converts the pending action into a missed record.
+func (m *Manager) missLocked() {
+	m.missed = &Missed{Action: m.action, WasDueAt: m.firesAt.Format(time.RFC3339)}
+	m.state = StateMissed
+	m.id = ""
+}
+
+// Dismiss clears a missed record. It is deliberately idempotent: two browser
+// tabs racing each other should not produce an error anybody has to think about.
+func (m *Manager) Dismiss() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.state == StateMissed {
+		m.state = StateIdle
+	}
+	m.missed = nil
+}
+
 func (m *Manager) Status() Status {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.expireFailedLocked()
 
-	s := Status{State: m.state}
+	s := Status{State: m.state, Missed: m.missed}
 	switch m.state {
 	case StatePending:
 		p := m.pendingLocked(m.now())
