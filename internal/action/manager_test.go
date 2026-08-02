@@ -570,3 +570,96 @@ func TestRestoreReportsAStoreFailure(t *testing.T) {
 		t.Errorf("State = %q, want idle after a failed restore", s.State)
 	}
 }
+
+// TestRestoreClearsAStaleMissedRecordWhenReArming pins that a re-armed deadline
+// and a missed record never coexist. Schedule enforces that everywhere else,
+// and Status exposes Missed regardless of state, so a stale Missed left over in
+// the persisted file must not survive alongside the pending action Restore just
+// re-armed.
+func TestRestoreClearsAStaleMissedRecordWhenReArming(t *testing.T) {
+	h := newHarness(t)
+	store := &memStore{saved: Persisted{
+		Missed: &Missed{Action: power.ActionSleep, WasDueAt: h.now.Format(time.RFC3339)},
+		Pending: &PersistedPending{
+			ID: "id-restored", Action: power.ActionShutdown, Force: true,
+			FiresAt: h.now.Add(time.Hour),
+		},
+	}}
+	h.mgr = New(h.fake, WithClock(func() time.Time { return h.now }), WithStore(store))
+
+	if err := h.mgr.Restore(); err != nil {
+		t.Fatalf("Restore() error = %v", err)
+	}
+
+	s := h.mgr.Status()
+	if s.State != StatePending || s.Missed != nil {
+		t.Fatalf("Status() = %+v, want pending with no missed record", s)
+	}
+}
+
+// TestFailedExecutionClearsThePersistedSchedule pins the actual consequence a
+// stale on-disk record would have: without clearing it, a restart within
+// MissedGrace of a failed attempt silently re-runs a power action nobody
+// confirmed a second time.
+func TestFailedExecutionClearsThePersistedSchedule(t *testing.T) {
+	h := newHarness(t)
+	store := &memStore{}
+	h.mgr = New(h.fake, WithClock(func() time.Time { return h.now }),
+		WithIDFunc(func() string { return "id-a" }), WithStore(store))
+	h.fake.SetError(errors.New("shutdown.exe exited 1"))
+
+	if _, err := h.schedule(t, power.ActionShutdown, true, 45*time.Second); err != nil {
+		t.Fatalf("Schedule() error = %v", err)
+	}
+	h.advance(45 * time.Second)
+
+	if s := h.mgr.Status(); s.State != StateFailed {
+		t.Fatalf("State = %q, want failed", s.State)
+	}
+	if store.saved.Pending != nil {
+		t.Fatalf("saved = %+v, want the failed deadline cleared from disk", store.saved)
+	}
+
+	fresh := New(h.fake, WithClock(func() time.Time { return h.now }), WithStore(store))
+	if err := fresh.Restore(); err != nil {
+		t.Fatalf("Restore() error = %v", err)
+	}
+	if s := fresh.Status(); s.State == StatePending {
+		t.Errorf("Status() = %+v, want the failed action not re-armed after a restart", s)
+	}
+}
+
+// TestADeadlineExactlyAtMissedGraceStillFires pins the inclusive MissedGrace
+// boundary in Tick: the comparison is now.Sub(firesAt) > MissedGrace, so an
+// exact match still fires rather than being reported as missed.
+func TestADeadlineExactlyAtMissedGraceStillFires(t *testing.T) {
+	h := newHarness(t)
+	if _, err := h.schedule(t, power.ActionShutdown, true, time.Hour); err != nil {
+		t.Fatalf("Schedule() error = %v", err)
+	}
+
+	h.advance(time.Hour + MissedGrace)
+
+	if len(h.fake.Calls()) != 1 {
+		t.Errorf("Calls() = %+v, want the action to fire exactly at the grace boundary", h.fake.Calls())
+	}
+}
+
+// TestRestoreReArmsADeadlineExactlyAtMissedGrace mirrors the Tick boundary test
+// for Restore's identical comparison.
+func TestRestoreReArmsADeadlineExactlyAtMissedGrace(t *testing.T) {
+	h := newHarness(t)
+	store := &memStore{saved: Persisted{Pending: &PersistedPending{
+		ID: "id-boundary", Action: power.ActionShutdown, Force: true,
+		FiresAt: h.now.Add(-MissedGrace),
+	}}}
+	h.mgr = New(h.fake, WithClock(func() time.Time { return h.now }), WithStore(store))
+
+	if err := h.mgr.Restore(); err != nil {
+		t.Fatalf("Restore() error = %v", err)
+	}
+
+	if s := h.mgr.Status(); s.State != StatePending {
+		t.Errorf("State = %q, want pending: a deadline exactly MissedGrace past re-arms rather than misses", s.State)
+	}
+}

@@ -231,6 +231,10 @@ func (m *Manager) Tick() {
 		m.state = StateFailed
 		m.lastErr = err.Error()
 		m.failedAt = m.now()
+		// The deadline that just fired is spent either way: clearing the record
+		// keeps a restart from re-arming and silently re-running an action an
+		// operator has not confirmed again.
+		m.persistLocked()
 		return
 	}
 	// Sleep and hibernate reach here only once the machine has resumed, because
@@ -355,6 +359,11 @@ func (m *Manager) Restore() error {
 		return nil
 	}
 
+	// A re-armed deadline and a missed record cannot coexist: Schedule enforces
+	// that everywhere else, and Status exposes Missed regardless of state, so a
+	// stale one left over from the persisted file would surface next to the
+	// pending action it has nothing to do with.
+	m.missed = nil
 	m.state = StatePending
 	m.id = p.Pending.ID
 	m.action = p.Pending.Action
