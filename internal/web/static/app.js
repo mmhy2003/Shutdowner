@@ -92,6 +92,16 @@
       if (b.dataset.action === "hibernate") b.disabled = !data.capabilities.hibernate;
     });
 
+    // A successful poll proves the PC is reachable, so any locally recorded
+    // "this action fired" marker is stale — the countdown may have elapsed
+    // here while the action was aborted from another device, or a different
+    // action may have been scheduled since. The one exception is a genuine
+    // in-flight execution: a shutdown that really is going down will stop
+    // answering polls shortly, and that is when "PC is offline" is correct.
+    if (data.state !== "executing") {
+      state.firedAction = null;
+    }
+
     if (data.state === "pending" && data.pending) {
       // Adopting the server's pending action is what makes an action scheduled
       // or aborted on another device show up here.
