@@ -37,11 +37,13 @@ func ResolveWhen(now time.Time, delaySeconds *int, at string, fallback time.Dura
 
 	switch {
 	case delaySeconds != nil:
-		d := time.Duration(*delaySeconds) * time.Second
-		if *delaySeconds < 0 || d > MaxHorizon {
+		// Check the bound on the raw int before multiplying to avoid overflow.
+		// An overflow can wrap a large positive int to a negative Duration,
+		// bypassing both guards and returning a bogus deadline in the past.
+		if *delaySeconds < 0 || *delaySeconds > int(MaxHorizon/time.Second) {
 			return time.Time{}, ErrDelayRange
 		}
-		return now.Add(d), nil
+		return now.Add(time.Duration(*delaySeconds) * time.Second), nil
 
 	case at != "":
 		firesAt, err := time.ParseInLocation(AtLayout, at, now.Location())

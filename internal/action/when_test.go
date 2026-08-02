@@ -89,6 +89,21 @@ func TestResolveWhen(t *testing.T) {
 			at:      "2026-08-10T00:00",
 			wantErr: ErrAtTooFar,
 		},
+		{
+			name:         "a delay large enough to overflow the duration is refused",
+			delaySeconds: intPtr(9223372037),
+			wantErr:      ErrDelayRange,
+		},
+		{
+			name: "at exactly at the horizon is accepted",
+			at:   "2026-08-09T14:30",
+			want: time.Date(2026, 8, 9, 14, 30, 0, 0, testLoc),
+		},
+		{
+			name: "at exactly equal to now is accepted",
+			at:   "2026-08-02T14:30",
+			want: time.Date(2026, 8, 2, 14, 30, 0, 0, testLoc),
+		},
 	}
 
 	for _, tt := range tests {

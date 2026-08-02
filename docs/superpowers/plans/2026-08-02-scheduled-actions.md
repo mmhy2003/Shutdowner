@@ -156,6 +156,21 @@ func TestResolveWhen(t *testing.T) {
 			at:      "2026-08-10T00:00",
 			wantErr: ErrAtTooFar,
 		},
+		{
+			name:         "a delay large enough to overflow the duration is refused",
+			delaySeconds: intPtr(9223372037),
+			wantErr:      ErrDelayRange,
+		},
+		{
+			name: "at exactly at the horizon is accepted",
+			at:   "2026-08-09T14:30",
+			want: time.Date(2026, 8, 9, 14, 30, 0, 0, testLoc),
+		},
+		{
+			name: "at exactly equal to now is accepted",
+			at:   "2026-08-02T14:30",
+			want: time.Date(2026, 8, 2, 14, 30, 0, 0, testLoc),
+		},
 	}
 
 	for _, tt := range tests {
@@ -242,11 +257,13 @@ func ResolveWhen(now time.Time, delaySeconds *int, at string, fallback time.Dura
 
 	switch {
 	case delaySeconds != nil:
-		d := time.Duration(*delaySeconds) * time.Second
-		if *delaySeconds < 0 || d > MaxHorizon {
+		// Check the bound on the raw int before multiplying to avoid overflow.
+		// An overflow can wrap a large positive int to a negative Duration,
+		// bypassing both guards and returning a bogus deadline in the past.
+		if *delaySeconds < 0 || *delaySeconds > int(MaxHorizon/time.Second) {
 			return time.Time{}, ErrDelayRange
 		}
-		return now.Add(d), nil
+		return now.Add(time.Duration(*delaySeconds) * time.Second), nil
 
 	case at != "":
 		firesAt, err := time.ParseInLocation(AtLayout, at, now.Location())
