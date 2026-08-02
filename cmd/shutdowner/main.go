@@ -231,7 +231,7 @@ func runServer() error {
 	srv, err := web.New(web.Options{
 		Sessions:     auth.NewSessionManager(cfg.SessionSecret, cfg.SessionTTL),
 		Limiter:      auth.NewLimiter(auth.DefaultPerIPLimit, auth.DefaultGlobalLimit, auth.DefaultWindow),
-		Actions:      action.New(ctrl, cfg.Delay),
+		Actions:      action.New(ctrl),
 		Power:        ctrl,
 		Logger:       logger,
 		PasswordHash: cfg.PasswordHash,

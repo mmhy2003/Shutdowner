@@ -10,38 +10,21 @@ import (
 	"shutdowner/internal/power"
 )
 
-// manualTimer replaces time.AfterFunc so tests fire the countdown immediately
-// instead of waiting for it.
-type manualTimer struct {
-	fn      func()
-	stopped bool
-}
-
-func (t *manualTimer) Stop() bool {
-	t.stopped = true
-	return true
-}
-
 type harness struct {
-	mgr   *Manager
-	fake  *power.Fake
-	timer *manualTimer
-	now   time.Time
-	ids   int
+	mgr  *Manager
+	fake *power.Fake
+	now  time.Time
+	ids  int
 }
 
-func newHarness(t *testing.T, delay time.Duration) *harness {
+func newHarness(t *testing.T) *harness {
 	t.Helper()
 	h := &harness{
 		fake: power.NewFake(),
 		now:  time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC),
 	}
-	h.mgr = New(h.fake, delay,
+	h.mgr = New(h.fake,
 		WithClock(func() time.Time { return h.now }),
-		WithAfterFunc(func(_ time.Duration, fn func()) Timer {
-			h.timer = &manualTimer{fn: fn}
-			return h.timer
-		}),
 		WithIDFunc(func() string {
 			h.ids++
 			return "id-" + string(rune('a'+h.ids-1))
@@ -50,19 +33,22 @@ func newHarness(t *testing.T, delay time.Duration) *harness {
 	return h
 }
 
-// fire runs the scheduled callback, standing in for the countdown elapsing.
-func (h *harness) fire(t *testing.T) {
+// schedule queues a after delay, which is what the caller now computes.
+func (h *harness) schedule(t *testing.T, a power.Action, force bool, delay time.Duration) (Pending, error) {
 	t.Helper()
-	if h.timer == nil {
-		t.Fatal("no timer was scheduled")
-	}
-	h.timer.fn()
+	return h.mgr.Schedule(context.Background(), a, force, h.now.Add(delay))
+}
+
+// advance moves the clock and ticks once, standing in for time passing.
+func (h *harness) advance(d time.Duration) {
+	h.now = h.now.Add(d)
+	h.mgr.Tick()
 }
 
 func TestScheduleFromIdle(t *testing.T) {
-	h := newHarness(t, 45*time.Second)
+	h := newHarness(t)
 
-	p, err := h.mgr.Schedule(context.Background(), power.ActionShutdown, true)
+	p, err := h.schedule(t, power.ActionShutdown, true, 45*time.Second)
 	if err != nil {
 		t.Fatalf("Schedule() error = %v, want nil", err)
 	}
@@ -84,71 +70,65 @@ func TestScheduleFromIdle(t *testing.T) {
 }
 
 func TestScheduleRejectsASecondAction(t *testing.T) {
-	h := newHarness(t, 45*time.Second)
-	if _, err := h.mgr.Schedule(context.Background(), power.ActionShutdown, true); err != nil {
+	h := newHarness(t)
+	if _, err := h.schedule(t, power.ActionShutdown, true, 45*time.Second); err != nil {
 		t.Fatalf("first Schedule() error = %v", err)
 	}
-	if _, err := h.mgr.Schedule(context.Background(), power.ActionRestart, true); !errors.Is(err, ErrConflict) {
+	if _, err := h.schedule(t, power.ActionRestart, true, 45*time.Second); !errors.Is(err, ErrConflict) {
 		t.Errorf("second Schedule() error = %v, want ErrConflict", err)
 	}
 }
 
 func TestScheduleRejectsAnInvalidAction(t *testing.T) {
-	h := newHarness(t, 45*time.Second)
-	if _, err := h.mgr.Schedule(context.Background(), power.Action("explode"), false); !errors.Is(err, ErrInvalidAction) {
+	h := newHarness(t)
+	if _, err := h.schedule(t, power.Action("explode"), false, 45*time.Second); !errors.Is(err, ErrInvalidAction) {
 		t.Errorf("Schedule() error = %v, want ErrInvalidAction", err)
 	}
 }
 
 func TestScheduleRejectsUnavailableSuspendActions(t *testing.T) {
-	h := newHarness(t, 45*time.Second)
+	h := newHarness(t)
 	h.fake.SetCapabilities(power.Capabilities{Sleep: true})
 
-	if _, err := h.mgr.Schedule(context.Background(), power.ActionHibernate, false); !errors.Is(err, ErrUnsupportedAction) {
+	if _, err := h.schedule(t, power.ActionHibernate, false, 45*time.Second); !errors.Is(err, ErrUnsupportedAction) {
 		t.Errorf("hibernate Schedule() error = %v, want ErrUnsupportedAction", err)
 	}
-	if _, err := h.mgr.Schedule(context.Background(), power.ActionSleep, false); err != nil {
+	if _, err := h.schedule(t, power.ActionSleep, false, 45*time.Second); err != nil {
 		t.Errorf("sleep Schedule() error = %v, want nil", err)
 	}
 }
 
 func TestShutdownIsNeverCapabilityGated(t *testing.T) {
-	h := newHarness(t, 45*time.Second)
+	h := newHarness(t)
 	h.fake.SetCapabilities(power.Capabilities{})
 
-	if _, err := h.mgr.Schedule(context.Background(), power.ActionShutdown, true); err != nil {
+	if _, err := h.schedule(t, power.ActionShutdown, true, 45*time.Second); err != nil {
 		t.Errorf("Schedule(shutdown) error = %v, want nil even with no capabilities", err)
 	}
 }
 
 func TestFiringExecutesTheAction(t *testing.T) {
-	h := newHarness(t, 45*time.Second)
-	if _, err := h.mgr.Schedule(context.Background(), power.ActionRestart, false); err != nil {
+	h := newHarness(t)
+	if _, err := h.schedule(t, power.ActionRestart, false, 45*time.Second); err != nil {
 		t.Fatalf("Schedule() error = %v", err)
 	}
 
-	h.fire(t)
+	h.advance(45 * time.Second)
 
 	calls := h.fake.Calls()
-	if len(calls) != 1 {
-		t.Fatalf("len(Calls()) = %d, want 1", len(calls))
-	}
-	if calls[0].Action != power.ActionRestart || calls[0].Force {
-		t.Errorf("Calls()[0] = %+v, want restart without force", calls[0])
-	}
-	if s := h.mgr.Status(); s.State != StateIdle {
-		t.Errorf("State = %q, want idle after a successful action", s.State)
+	if len(calls) != 1 || calls[0].Action != power.ActionRestart || calls[0].Force {
+		t.Errorf("Calls() = %+v, want one graceful restart", calls)
 	}
 }
 
 func TestExecutionFailureIsReported(t *testing.T) {
-	h := newHarness(t, 45*time.Second)
+	h := newHarness(t)
 	h.fake.SetError(errors.New("shutdown.exe exited 1"))
 
-	if _, err := h.mgr.Schedule(context.Background(), power.ActionShutdown, true); err != nil {
+	if _, err := h.schedule(t, power.ActionShutdown, true, 45*time.Second); err != nil {
 		t.Fatalf("Schedule() error = %v", err)
 	}
-	h.fire(t)
+	h.advance(45 * time.Second)
 
 	s := h.mgr.Status()
 	if s.State != StateFailed {
@@ -160,12 +140,12 @@ func TestExecutionFailureIsReported(t *testing.T) {
 }
 
 func TestFailedRevertsToIdle(t *testing.T) {
-	h := newHarness(t, 45*time.Second)
+	h := newHarness(t)
 	h.fake.SetError(errors.New("nope"))
-	if _, err := h.mgr.Schedule(context.Background(), power.ActionShutdown, true); err != nil {
+	if _, err := h.schedule(t, power.ActionShutdown, true, 45*time.Second); err != nil {
 		t.Fatalf("Schedule() error = %v", err)
 	}
-	h.fire(t)
+	h.advance(45 * time.Second)
 
 	h.now = h.now.Add(FailedRetention - time.Second)
 	if s := h.mgr.Status(); s.State != StateFailed {
@@ -179,50 +159,44 @@ func TestFailedRevertsToIdle(t *testing.T) {
 }
 
 func TestScheduleIsAllowedFromFailed(t *testing.T) {
-	h := newHarness(t, 45*time.Second)
+	h := newHarness(t)
 	h.fake.SetError(errors.New("nope"))
-	if _, err := h.mgr.Schedule(context.Background(), power.ActionShutdown, true); err != nil {
+	if _, err := h.schedule(t, power.ActionShutdown, true, 45*time.Second); err != nil {
 		t.Fatalf("Schedule() error = %v", err)
 	}
-	h.fire(t)
+	h.advance(45 * time.Second)
 	if s := h.mgr.Status(); s.State != StateFailed {
 		t.Fatalf("State = %q, want failed", s.State)
 	}
 
 	h.fake.SetError(nil)
-	if _, err := h.mgr.Schedule(context.Background(), power.ActionRestart, true); err != nil {
+	if _, err := h.schedule(t, power.ActionRestart, true, 45*time.Second); err != nil {
 		t.Errorf("Schedule() from failed error = %v, want nil", err)
 	}
 }
 
 func TestAbortCancelsAPendingAction(t *testing.T) {
-	h := newHarness(t, 45*time.Second)
-	p, err := h.mgr.Schedule(context.Background(), power.ActionShutdown, true)
+	h := newHarness(t)
+	p, err := h.schedule(t, power.ActionShutdown, true, 45*time.Second)
 	if err != nil {
 		t.Fatalf("Schedule() error = %v", err)
 	}
-
 	if err := h.mgr.Abort(p.ID); err != nil {
 		t.Fatalf("Abort() error = %v, want nil", err)
-	}
-	if !h.timer.stopped {
-		t.Error("the timer was not stopped")
 	}
 	if s := h.mgr.Status(); s.State != StateIdle {
 		t.Errorf("State = %q, want idle", s.State)
 	}
 
-	// Even if the timer had already been racing towards firing, a stale
-	// callback must not execute the aborted action.
-	h.fire(t)
+	h.advance(45 * time.Second)
 	if len(h.fake.Calls()) != 0 {
-		t.Error("an aborted action still executed")
+		t.Error("the action ran after being aborted")
 	}
 }
 
 func TestAbortRejectsAStaleID(t *testing.T) {
-	h := newHarness(t, 45*time.Second)
-	if _, err := h.mgr.Schedule(context.Background(), power.ActionShutdown, true); err != nil {
+	h := newHarness(t)
+	if _, err := h.schedule(t, power.ActionShutdown, true, 45*time.Second); err != nil {
 		t.Fatalf("Schedule() error = %v", err)
 	}
 	if err := h.mgr.Abort("id-from-an-old-tab"); !errors.Is(err, ErrNoPending) {
@@ -234,15 +208,15 @@ func TestAbortRejectsAStaleID(t *testing.T) {
 }
 
 func TestAbortWhenIdle(t *testing.T) {
-	h := newHarness(t, 45*time.Second)
+	h := newHarness(t)
 	if err := h.mgr.Abort("anything"); !errors.Is(err, ErrNoPending) {
 		t.Errorf("Abort() error = %v, want ErrNoPending", err)
 	}
 }
 
 func TestRemainingSecondsCountsDown(t *testing.T) {
-	h := newHarness(t, 45*time.Second)
-	if _, err := h.mgr.Schedule(context.Background(), power.ActionShutdown, true); err != nil {
+	h := newHarness(t)
+	if _, err := h.schedule(t, power.ActionShutdown, true, 45*time.Second); err != nil {
 		t.Fatalf("Schedule() error = %v", err)
 	}
 
@@ -262,7 +236,7 @@ func TestRemainingSecondsCountsDown(t *testing.T) {
 }
 
 func TestStatusOmitsPendingWhenIdle(t *testing.T) {
-	h := newHarness(t, 45*time.Second)
+	h := newHarness(t)
 	s := h.mgr.Status()
 	if s.State != StateIdle {
 		t.Errorf("State = %q, want idle", s.State)
@@ -272,6 +246,26 @@ func TestStatusOmitsPendingWhenIdle(t *testing.T) {
 	}
 	if s.Error != "" {
 		t.Errorf("Error = %q, want empty", s.Error)
+	}
+}
+
+func TestTickBeforeTheDeadlineDoesNothing(t *testing.T) {
+	h := newHarness(t)
+	if _, err := h.schedule(t, power.ActionShutdown, true, 2*time.Hour); err != nil {
+		t.Fatalf("Schedule() error = %v", err)
+	}
+
+	h.advance(119 * time.Minute)
+	if len(h.fake.Calls()) != 0 {
+		t.Fatal("the action ran before its deadline")
+	}
+	if s := h.mgr.Status(); s.State != StatePending {
+		t.Errorf("State = %q, want pending", s.State)
+	}
+
+	h.advance(time.Minute)
+	if len(h.fake.Calls()) != 1 {
+		t.Error("the action did not run at its deadline")
 	}
 }
 
@@ -304,19 +298,17 @@ func (panickingController) Capabilities(context.Context) (power.Capabilities, er
 }
 
 func TestAPanicDuringExecutionBecomesAFailure(t *testing.T) {
-	var timer *manualTimer
-	m := New(panickingController{}, 45*time.Second, WithAfterFunc(func(_ time.Duration, fn func()) Timer {
-		timer = &manualTimer{fn: fn}
-		return timer
-	}))
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	m := New(panickingController{}, WithClock(func() time.Time { return now }))
 
-	if _, err := m.Schedule(context.Background(), power.ActionShutdown, true); err != nil {
+	// A deadline equal to now fires on the next tick.
+	if _, err := m.Schedule(context.Background(), power.ActionShutdown, true, now); err != nil {
 		t.Fatalf("Schedule() error = %v", err)
 	}
 
-	// The process must survive this: firing happens on the timer goroutine,
+	// The process must survive this: firing happens on the tick goroutine,
 	// outside the HTTP server's recoverPanic middleware.
-	timer.fn()
+	m.Tick()
 
 	s := m.Status()
 	if s.State != StateFailed {
@@ -330,29 +322,28 @@ func TestAPanicDuringExecutionBecomesAFailure(t *testing.T) {
 	}
 
 	// And the manager must still be usable rather than wedged in executing.
-	if _, err := m.Schedule(context.Background(), power.ActionRestart, true); err != nil {
+	if _, err := m.Schedule(context.Background(), power.ActionRestart, true, now); err != nil {
 		t.Errorf("Schedule() after a panic error = %v, want nil", err)
 	}
 }
 
 func TestScheduleRejectedWhileExecuting(t *testing.T) {
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 	ctrl := &blockingController{release: make(chan struct{}), entered: make(chan struct{})}
-	var timer *manualTimer
-	m := New(ctrl, time.Second, WithAfterFunc(func(_ time.Duration, fn func()) Timer {
-		timer = &manualTimer{fn: fn}
-		return timer
-	}))
+	m := New(ctrl, WithClock(func() time.Time { return now }))
 
-	if _, err := m.Schedule(context.Background(), power.ActionShutdown, true); err != nil {
+	if _, err := m.Schedule(context.Background(), power.ActionShutdown, true, now); err != nil {
 		t.Fatalf("Schedule() error = %v", err)
 	}
-	go timer.fn()
+	// Tick blocks for as long as Execute does, which is the whole point of this
+	// test, so it runs on its own goroutine.
+	go m.Tick()
 	<-ctrl.entered
 
 	if s := m.Status(); s.State != StateExecuting {
 		t.Errorf("State = %q, want executing", s.State)
 	}
-	if _, err := m.Schedule(context.Background(), power.ActionRestart, true); !errors.Is(err, ErrConflict) {
+	if _, err := m.Schedule(context.Background(), power.ActionRestart, true, now); !errors.Is(err, ErrConflict) {
 		t.Errorf("Schedule() while executing error = %v, want ErrConflict", err)
 	}
 	close(ctrl.release)

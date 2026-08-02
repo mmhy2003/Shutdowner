@@ -7,6 +7,7 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"shutdowner/internal/action"
 	"shutdowner/internal/auth"
@@ -35,6 +36,7 @@ type Server struct {
 	static       http.Handler
 	passwordHash string
 	delaySeconds int
+	delay        time.Duration
 }
 
 func New(o Options) (*Server, error) {
@@ -62,6 +64,7 @@ func New(o Options) (*Server, error) {
 		static:       static,
 		passwordHash: o.PasswordHash,
 		delaySeconds: o.DelaySeconds,
+		delay:        time.Duration(o.DelaySeconds) * time.Second,
 	}, nil
 }
 

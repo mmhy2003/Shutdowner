@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"time"
 
 	"shutdowner/internal/action"
 	"shutdowner/internal/power"
@@ -85,7 +86,7 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pending, err := s.actions.Schedule(r.Context(), req.Action, req.Force)
+	pending, err := s.actions.Schedule(r.Context(), req.Action, req.Force, time.Now().Add(s.delay))
 	if err != nil {
 		switch {
 		case errors.Is(err, action.ErrInvalidAction), errors.Is(err, action.ErrUnsupportedAction):
