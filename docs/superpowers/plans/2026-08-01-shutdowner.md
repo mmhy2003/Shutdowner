@@ -4992,13 +4992,10 @@ func Uninstall() error {
 	}
 	defer s.Close()
 
-	if _, err := s.Control(svc.Stop); err != nil && !errors.Is(err, svc.ErrAlreadyStopped) {
-		// Not fatal: a service that will not stop can still be marked for
-		// deletion and disappears at the next reboot.
-		waitForStop(s)
-	} else {
-		waitForStop(s)
-	}
+	// Best effort: a service that will not stop can still be marked for
+	// deletion and disappears at the next reboot.
+	_, _ = s.Control(svc.Stop)
+	waitForStop(s)
 
 	if err := s.Delete(); err != nil {
 		return fmt.Errorf("deleting the service: %w", err)
@@ -5041,7 +5038,7 @@ GOOS=windows GOARCH=amd64 go vet ./...
 
 Expected: PASS on Linux, and both Windows commands silent.
 
-If `svc.ErrAlreadyStopped` does not exist in the pinned `golang.org/x/sys` version, the compiler will say so. Replace that branch with a plain `_, _ = s.Control(svc.Stop)` followed by `waitForStop(s)` — stopping is best effort either way.
+Note: `svc.ErrAlreadyStopped` does not exist in `golang.org/x/sys` v0.47.0 — verified by grepping the module cache. `Uninstall` therefore treats the stop as best effort rather than branching on that error, which is why `errors` is not imported here.
 
 - [ ] **Step 7: Commit**
 
