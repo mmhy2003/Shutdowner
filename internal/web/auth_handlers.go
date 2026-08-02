@@ -26,6 +26,9 @@ func (s *Server) handleLoginForm(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/", http.StatusFound)
 			return
 		}
+		// Present but unusable: clear it rather than let the browser keep
+		// re-sending a cookie that will never verify.
+		s.clearSessionCookie(w)
 	}
 	s.renderLogin(w, http.StatusOK, "")
 }

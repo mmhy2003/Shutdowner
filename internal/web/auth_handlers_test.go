@@ -66,6 +66,10 @@ func TestLoginSucceeds(t *testing.T) {
 	if c.Path != "/" {
 		t.Errorf("Path = %q, want /", c.Path)
 	}
+	// The TTL in newTestEnv is one hour; MaxAge is the fifth required attribute.
+	if c.MaxAge != 3600 {
+		t.Errorf("MaxAge = %d, want 3600", c.MaxAge)
+	}
 	if _, err := e.srv.sessions.Verify(c.Value); err != nil {
 		t.Errorf("the issued cookie does not verify: %v", err)
 	}
@@ -180,5 +184,34 @@ func TestLoginIsExemptFromCSRF(t *testing.T) {
 	res := postForm(t, e.handler, "/login", url.Values{"password": {testPassword}}, nil)
 	if res.Code != http.StatusFound {
 		t.Errorf("status = %d, want 302", res.Code)
+	}
+}
+
+func TestLoginFormClearsAnUnusableCookie(t *testing.T) {
+	e := newTestEnv(t)
+
+	c := e.sessionCookie(t)
+	c.Value = c.Value[:len(c.Value)-1] + "X"
+	r := httptest.NewRequest(http.MethodGet, "/login", nil)
+	r.AddCookie(c)
+
+	res := do(t, e.handler, r)
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", res.Code)
+	}
+	cleared := findCookie(res, SessionCookieName)
+	if cleared == nil || cleared.MaxAge >= 0 {
+		t.Error("a cookie that fails verification was not cleared")
+	}
+}
+
+func TestLoginFormSetsNoCookieWhenNoneWasSent(t *testing.T) {
+	e := newTestEnv(t)
+	res := do(t, e.handler, httptest.NewRequest(http.MethodGet, "/login", nil))
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", res.Code)
+	}
+	if findCookie(res, SessionCookieName) != nil {
+		t.Error("a Set-Cookie was sent to a visitor who had no cookie")
 	}
 }
