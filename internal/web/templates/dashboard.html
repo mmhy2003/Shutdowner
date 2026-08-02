@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Shutdowner</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="dashboard" data-csrf="{{.CSRFToken}}" data-delay="{{.DelaySeconds}}">
+  <main class="card">
+    <header class="status">
+      <div class="titlebar">
+        <h1 id="hostname">{{.Info.Hostname}}</h1>
+        <span id="reachability" class="badge online">online</span>
+      </div>
+      <p id="os" class="muted">{{.Info.OS}}</p>
+      <p class="muted"><span id="uptime"></span> · <span id="localtime"></span></p>
+    </header>
+
+    <section class="actions">
+      <button class="action" data-action="shutdown">Shut down</button>
+      <button class="action" data-action="restart">Restart</button>
+      <button class="action" data-action="sleep"
+        {{if not .Capabilities.Sleep}}disabled title="Sleep is not available on this system"{{end}}>Sleep</button>
+      <button class="action" data-action="hibernate"
+        {{if not .Capabilities.Hibernate}}disabled title="Hibernate is not enabled on this system"{{end}}>Hibernate</button>
+    </section>
+
+    <section class="pending hidden" id="pending">
+      <p id="pending-text"></p>
+      <button id="abort" class="primary">Abort</button>
+    </section>
+
+    <p class="error hidden" id="error" role="alert"></p>
+
+    <form method="post" action="/logout" class="logout">
+      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+      <button type="submit" class="link">Sign out</button>
+    </form>
+  </main>
+
+  <dialog id="confirm">
+    <form method="dialog">
+      <h2 id="confirm-title"></h2>
+      <label class="checkbox"><input type="checkbox" id="graceful"> Close apps gracefully</label>
+      <p class="hint">Leave unchecked to force apps closed. Unsaved work will be lost.</p>
+      <menu>
+        <button value="cancel">Cancel</button>
+        <button value="confirm" class="danger">Confirm</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -6,14 +6,14 @@
 
 **Architecture:** One process on the target PC. `internal/power` wraps the OS calls behind a `Controller` interface, `internal/action` owns an abortable countdown state machine, `internal/web` serves an embedded server-rendered UI with signed-cookie sessions. Cloudflare Tunnel fronts it; the app binds loopback only. The `Controller` seam plus a `Fake` implementation is what lets every layer above the syscalls be developed and tested on Linux.
 
-**Tech Stack:** Go 1.24+, `html/template` + `embed.FS`, vanilla JS, `golang.org/x/crypto` (bcrypt), `golang.org/x/sys` (Win32 + service framework), `github.com/joho/godotenv`.
+**Tech Stack:** Go 1.25+, `html/template` + `embed.FS`, vanilla JS, `golang.org/x/crypto` (bcrypt), `golang.org/x/sys` (Win32 + service framework), `github.com/joho/godotenv`.
 
 **Spec:** `docs/superpowers/specs/2026-08-01-remote-windows-power-control-design.md`
 
 ## Global Constraints
 
 - **Module path:** `shutdowner`. All internal imports are `shutdowner/internal/...`.
-- **Go version:** go.mod declares `go 1.24`. Development toolchain is go1.26.5.
+- **Go version:** go.mod declares `go 1.25.0`. Development toolchain is go1.26.5. The floor is 1.25.0 rather than something more conservative because `golang.org/x/crypto` and `golang.org/x/sys` both declare `go 1.25.0` themselves, and Go requires the main module's floor to be at least as high as any dependency's. This only bites once a dependency is actually imported, so Task 1 builds at a lower floor and Task 2 does not.
 - **Exactly three external dependencies:** `golang.org/x/crypto`, `golang.org/x/sys`, `github.com/joho/godotenv`. Do not add a fourth — log rotation and no-echo password entry are hand-rolled specifically to avoid one.
 - **Never resolve paths from the working directory.** A LocalSystem service starts in `C:\Windows\System32`. `.env` and the log file resolve from `os.Executable()`.
 - **Loopback-only bind** unless `--allow-public-bind` is passed. Startup fails otherwise.
@@ -1517,7 +1517,7 @@ git add internal/power/
 git commit -m "feat: power controller interface, argument builder and fake"
 ```
 
-Note: `GOOS=windows go build ./...` fails at this point because `systemController` has no Windows implementation yet. That is expected and fixed by Task 7, which is why the Windows build check is omitted from this commit only.
+Note: `GOOS=windows GOARCH=amd64 go build ./...` succeeds here, despite there being no Windows `systemController` yet. On a Windows target `unsupported.go` is excluded by its build tag, leaving a `power` package that simply has no `New` — and since nothing calls `power.New()` until Task 16 wires it, there is no dangling reference to fail on. The normal both-builds-green constraint therefore applies to this task like any other.
 
 ---
 
@@ -1532,10 +1532,10 @@ Note: `GOOS=windows go build ./...` fails at this point because `systemControlle
 
 This task has no unit tests: it is a thin wrapper over syscalls that cannot execute here. Its verification is that it compiles and vets clean for Windows, and it is covered by items 4-7 of the manual checklist in Task 16.
 
-- [ ] **Step 1: Confirm the Windows build currently fails**
+- [ ] **Step 1: Confirm the Windows target currently has no controller**
 
-Run: `GOOS=windows GOARCH=amd64 go build ./...`
-Expected: FAIL — `undefined: systemController` in package `shutdowner/internal/power`.
+Run: `GOOS=windows GOARCH=amd64 go doc shutdowner/internal/power New`
+Expected: an error reporting no symbol `New` — the Windows build of the package compiles but exposes no constructor, which is exactly the gap this task fills.
 
 - [ ] **Step 2: Write the implementation**
 
@@ -4992,13 +4992,10 @@ func Uninstall() error {
 	}
 	defer s.Close()
 
-	if _, err := s.Control(svc.Stop); err != nil && !errors.Is(err, svc.ErrAlreadyStopped) {
-		// Not fatal: a service that will not stop can still be marked for
-		// deletion and disappears at the next reboot.
-		waitForStop(s)
-	} else {
-		waitForStop(s)
-	}
+	// Best effort: a service that will not stop can still be marked for
+	// deletion and disappears at the next reboot.
+	_, _ = s.Control(svc.Stop)
+	waitForStop(s)
 
 	if err := s.Delete(); err != nil {
 		return fmt.Errorf("deleting the service: %w", err)
@@ -5041,7 +5038,7 @@ GOOS=windows GOARCH=amd64 go vet ./...
 
 Expected: PASS on Linux, and both Windows commands silent.
 
-If `svc.ErrAlreadyStopped` does not exist in the pinned `golang.org/x/sys` version, the compiler will say so. Replace that branch with a plain `_, _ = s.Control(svc.Stop)` followed by `waitForStop(s)` — stopping is best effort either way.
+Note: `svc.ErrAlreadyStopped` does not exist in `golang.org/x/sys` v0.47.0 — verified by grepping the module cache. `Uninstall` therefore treats the stop as best effort rather than branching on that error, which is why `errors` is not imported here.
 
 - [ ] **Step 7: Commit**
 
@@ -5425,9 +5422,15 @@ func runServer() error {
 		http: &http.Server{
 			Addr:    cfg.Listen,
 			Handler: srv.Routes(),
-			// The tunnel is the only client, but a slow-header attack would
-			// still tie up connections without this.
+			// The tunnel is the only client, but a slow-header or slow-body
+			// attack would still tie up connections without these. WriteTimeout
+			// is safe at 30s because no handler blocks: a power action is
+			// executed by the action manager's timer goroutine, never inside a
+			// request.
 			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       20 * time.Second,
+			WriteTimeout:      30 * time.Second,
+			IdleTimeout:       120 * time.Second,
 		},
 	}
 
