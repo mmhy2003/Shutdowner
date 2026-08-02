@@ -17,6 +17,11 @@ make build-windows      # produces dist/shutdowner.exe
 make test               # runs the suite on any platform
 ```
 
+The executable's icon comes from `logo.png` by way of `assets/icon.ico` and
+`cmd/shutdowner/rsrc_windows_amd64.syso`, which the Go linker picks up on its
+own. Both are committed, so a normal build needs neither the network nor any
+extra tool; run `make icon` to rebuild them after changing the logo.
+
 ## Install on the Windows PC
 
 1. Copy `shutdowner.exe` to `C:\Program Files\Shutdowner\`.
