@@ -98,6 +98,33 @@ func TestPagesLinkTheFavicon(t *testing.T) {
 	}
 }
 
+// The dashboard shows the logo above the card, which needs both the markup to
+// point at the asset and the asset to be served.
+func TestDashboardShowsTheLogo(t *testing.T) {
+	e := newTestEnv(t)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(e.sessionCookie(t))
+
+	res := do(t, e.handler, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", res.Code)
+	}
+	if !strings.Contains(res.Body.String(), `src="/static/logo.png"`) {
+		t.Error("the dashboard does not reference /static/logo.png")
+	}
+
+	asset := do(t, e.handler, httptest.NewRequest(http.MethodGet, "/static/logo.png", nil))
+	if asset.Code != http.StatusOK {
+		t.Fatalf("logo status = %d, want 200", asset.Code)
+	}
+	if ct := asset.Header().Get("Content-Type"); !strings.Contains(ct, "image/png") {
+		t.Errorf("Content-Type = %q, want it to contain %q", ct, "image/png")
+	}
+	if !bytes.HasPrefix(asset.Body.Bytes(), []byte("\x89PNG\r\n\x1a\n")) {
+		t.Error("the body does not start with a PNG signature")
+	}
+}
+
 func TestMissingStaticAssetIs404(t *testing.T) {
 	e := newTestEnv(t)
 	res := do(t, e.handler, httptest.NewRequest(http.MethodGet, "/static/nope.css", nil))

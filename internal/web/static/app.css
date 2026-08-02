@@ -29,12 +29,23 @@ body {
   margin: 0;
   min-height: 100vh;
   display: flex;
+  /* Stacking, so the dashboard's logo sits above the card instead of beside
+     it. In a column the two centring rules swap axes and cancel out, which is
+     why the login page looks no different for having only one child. */
+  flex-direction: column;
   align-items: center;
   justify-content: center;
   padding: 1rem;
   background: var(--bg);
   color: var(--fg);
   font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.logo {
+  width: 15rem;
+  max-width: 100%;
+  height: auto;
+  margin-bottom: 1rem;
 }
 
 .card {

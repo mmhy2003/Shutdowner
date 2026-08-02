@@ -19,8 +19,9 @@ make test               # runs the suite on any platform
 
 The executable's icon comes from `logo.png` by way of `assets/icon.ico` and
 `cmd/shutdowner/rsrc_windows_amd64.syso`, which the Go linker picks up on its
-own. The web UI's favicon comes from the same logo and is embedded as
-`internal/web/static/favicon.ico`. All three are committed, so a normal build
+own. The same logo also becomes the web UI's favicon and the image the
+dashboard shows above its card, embedded as `internal/web/static/favicon.ico`
+and `internal/web/static/logo.png`. All of them are committed, so a normal build
 needs neither the network nor any extra tool; run `make icon` to rebuild them
 after changing the logo.
 

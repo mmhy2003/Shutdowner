@@ -8,6 +8,9 @@
   <link rel="stylesheet" href="/static/app.css">
 </head>
 <body class="dashboard" data-csrf="{{.CSRFToken}}" data-delay="{{.DelaySeconds}}">
+  <!-- The attributes carry the file's own dimensions so the browser reserves
+       the right space before it loads; app.css picks the displayed size. -->
+  <img class="logo" src="/static/logo.png" width="480" height="257" alt="Remote Shutdown">
   <main class="card">
     <header class="status">
       <div class="titlebar">

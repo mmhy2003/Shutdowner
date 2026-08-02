@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"image/draw"
 	"image/png"
 	"os"
 	"path/filepath"
@@ -41,6 +42,7 @@ var (
 	flagSmall    = flag.String("small", "383,150,700,470", "x0,y0,x1,y1 of the artwork used at -small-max and below")
 	flagSmallMax = flag.Int("small-max", 32, "largest icon size that uses the -small artwork")
 	flagPad      = flag.Float64("pad", 0.02, "margin left around the artwork, as a fraction of the icon side")
+	flagWidth    = flag.Int("width", 0, "width of a .png output; 0 keeps the cropped artwork's own width")
 
 	// The default is what Windows asks for: 16 in the title bar and tree views,
 	// 32 on the desktop, 48 in Explorer's medium view, 256 for the extra large
@@ -64,19 +66,6 @@ func main() {
 }
 
 func run() error {
-	sizes, err := parseSizes(*flagSizes)
-	if err != nil {
-		return fmt.Errorf("-sizes: %w", err)
-	}
-	full, err := parseRect(*flagFull)
-	if err != nil {
-		return fmt.Errorf("-full: %w", err)
-	}
-	small, err := parseRect(*flagSmall)
-	if err != nil {
-		return fmt.Errorf("-small: %w", err)
-	}
-
 	src, err := readPNG(*flagIn)
 	if err != nil {
 		return err
@@ -84,13 +73,58 @@ func run() error {
 	// Trimming to the opaque bounding box means the crop flags only have to be
 	// roughly right: they select which part of the logo to keep, and the trim
 	// takes care of centring it and filling the canvas.
-	full, err = trim(src, full.Intersect(src.Bounds()))
+	full, err := cropFlag("-full", *flagFull, src)
 	if err != nil {
-		return fmt.Errorf("-full: %w", err)
+		return err
 	}
-	small, err = trim(src, small.Intersect(src.Bounds()))
+
+	var data []byte
+	var summary string
+	switch ext := strings.ToLower(filepath.Ext(*flagOut)); ext {
+	case ".ico":
+		data, summary, err = buildICO(src, full)
+	case ".png":
+		data, summary, err = buildPNG(src, full)
+	default:
+		err = fmt.Errorf("-out: %q is neither .ico nor .png", ext)
+	}
 	if err != nil {
-		return fmt.Errorf("-small: %w", err)
+		return err
+	}
+
+	if dir := filepath.Dir(*flagOut); dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
+	if err := os.WriteFile(*flagOut, data, 0o644); err != nil {
+		return err
+	}
+	fmt.Printf("wrote %s: %s, %d bytes\n", *flagOut, summary, len(data))
+	return nil
+}
+
+// cropFlag turns one of the rectangle flags into the artwork it selects.
+func cropFlag(name, value string, src image.Image) (image.Rectangle, error) {
+	r, err := parseRect(value)
+	if err != nil {
+		return r, fmt.Errorf("%s: %w", name, err)
+	}
+	r, err = trim(src, r.Intersect(src.Bounds()))
+	if err != nil {
+		return r, fmt.Errorf("%s: %w", name, err)
+	}
+	return r, nil
+}
+
+func buildICO(src image.Image, full image.Rectangle) ([]byte, string, error) {
+	sizes, err := parseSizes(*flagSizes)
+	if err != nil {
+		return nil, "", fmt.Errorf("-sizes: %w", err)
+	}
+	small, err := cropFlag("-small", *flagSmall, src)
+	if err != nil {
+		return nil, "", err
 	}
 
 	images := make([]*image.NRGBA, len(sizes))
@@ -99,23 +133,29 @@ func run() error {
 		if size <= *flagSmallMax {
 			art = small
 		}
-		images[i] = render(src, art, size, *flagPad)
-	}
-
-	if dir := filepath.Dir(*flagOut); dir != "." {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return err
-		}
+		images[i] = renderIcon(src, art, size, *flagPad)
 	}
 	data, err := encodeICO(images, *flagDIBMax)
 	if err != nil {
-		return err
+		return nil, "", err
 	}
-	if err := os.WriteFile(*flagOut, data, 0o644); err != nil {
-		return err
+	return data, fmt.Sprintf("%d entries (%v)", len(sizes), sizes), nil
+}
+
+// buildPNG writes the -full artwork at its own aspect ratio rather than
+// letterboxed into a square, because the page that displays it lays it out as a
+// picture and not as an icon.
+func buildPNG(src image.Image, full image.Rectangle) ([]byte, string, error) {
+	w := *flagWidth
+	if w <= 0 {
+		w = full.Dx()
 	}
-	fmt.Printf("wrote %s: %d entries (%v), %d bytes\n", *flagOut, len(sizes), sizes, len(data))
-	return nil
+	h := max(int(float64(w)*float64(full.Dy())/float64(full.Dx())+0.5), 1)
+	data, err := encodePNG(resample(src, full, w, h))
+	if err != nil {
+		return nil, "", err
+	}
+	return data, fmt.Sprintf("%dx%d", w, h), nil
 }
 
 func readPNG(path string) (image.Image, error) {
@@ -177,26 +217,44 @@ func parseRect(s string) (image.Rectangle, error) {
 const alphaFloor = 0x2000
 
 // trim shrinks r to the bounding box of the artwork inside it.
+//
+// The bounds are tracked as plain ints rather than as a Rectangle seeded
+// inside out, because image.Rect canonicalises its arguments: it would swap the
+// inverted corners back the right way round and hand back a box that already
+// covers everything, which no min or max could then shrink.
 func trim(img image.Image, r image.Rectangle) (image.Rectangle, error) {
-	box := image.Rect(r.Max.X, r.Max.Y, r.Min.X, r.Min.Y)
+	minX, minY := r.Max.X, r.Max.Y
+	maxX, maxY := r.Min.X, r.Min.Y
 	for y := r.Min.Y; y < r.Max.Y; y++ {
 		for x := r.Min.X; x < r.Max.X; x++ {
 			if _, _, _, a := img.At(x, y).RGBA(); a > alphaFloor {
-				box.Min.X = min(box.Min.X, x)
-				box.Min.Y = min(box.Min.Y, y)
-				box.Max.X = max(box.Max.X, x+1)
-				box.Max.Y = max(box.Max.Y, y+1)
+				minX, minY = min(minX, x), min(minY, y)
+				maxX, maxY = max(maxX, x+1), max(maxY, y+1)
 			}
 		}
 	}
-	if box.Empty() {
-		return box, fmt.Errorf("%v holds no opaque pixels", r)
+	if minX >= maxX || minY >= maxY {
+		return image.Rectangle{}, fmt.Errorf("%v holds no opaque pixels", r)
 	}
-	return box, nil
+	return image.Rect(minX, minY, maxX, maxY), nil
 }
 
-// render scales src[art] to fit a size x size canvas, preserving the aspect
+// renderIcon scales src[art] to fit a size x size canvas, preserving the aspect
 // ratio and centring the result, with pad of the side left as margin.
+func renderIcon(src image.Image, art image.Rectangle, size int, pad float64) *image.NRGBA {
+	side := float64(size) * (1 - 2*pad)
+	sw, sh := float64(art.Dx()), float64(art.Dy())
+	scale := min(side/sw, side/sh)
+	dw, dh := max(int(sw*scale+0.5), 1), max(int(sh*scale+0.5), 1)
+
+	dst := image.NewNRGBA(image.Rect(0, 0, size, size))
+	at := image.Pt((size-dw)/2, (size-dh)/2)
+	draw.Draw(dst, image.Rectangle{Min: at, Max: at.Add(image.Pt(dw, dh))},
+		resample(src, art, dw, dh), image.Point{}, draw.Src)
+	return dst
+}
+
+// resample scales src[art] to exactly dw x dh.
 //
 // The filter is a plain box average over the source pixels each destination
 // pixel covers. Every reduction here is by a factor of three or more, which is
@@ -204,14 +262,9 @@ func trim(img image.Image, r image.Rectangle) (image.Rectangle, error) {
 // ringing a sharper kernel would introduce along the logo's hard colour edges.
 // Averaging happens in premultiplied space so that transparent pixels along the
 // artwork's edge do not drag their (undefined) colour into the result.
-func render(src image.Image, art image.Rectangle, size int, pad float64) *image.NRGBA {
-	dst := image.NewNRGBA(image.Rect(0, 0, size, size))
-
-	side := float64(size) * (1 - 2*pad)
+func resample(src image.Image, art image.Rectangle, dw, dh int) *image.NRGBA {
+	dst := image.NewNRGBA(image.Rect(0, 0, dw, dh))
 	sw, sh := float64(art.Dx()), float64(art.Dy())
-	scale := min(side/sw, side/sh)
-	dw, dh := max(int(sw*scale+0.5), 1), max(int(sh*scale+0.5), 1)
-	offX, offY := (size-dw)/2, (size-dh)/2
 
 	for dy := 0; dy < dh; dy++ {
 		y0 := art.Min.Y + int(float64(dy)*sh/float64(dh))
@@ -231,7 +284,7 @@ func render(src image.Image, art image.Rectangle, size int, pad float64) *image.
 				R: uint16(sumR / n), G: uint16(sumG / n),
 				B: uint16(sumB / n), A: uint16(sumA / n),
 			}
-			dst.SetNRGBA(offX+dx, offY+dy, color.NRGBAModel.Convert(avg).(color.NRGBA))
+			dst.SetNRGBA(dx, dy, color.NRGBAModel.Convert(avg).(color.NRGBA))
 		}
 	}
 	return dst
