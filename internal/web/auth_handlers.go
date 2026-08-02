@@ -56,7 +56,13 @@ func (s *Server) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := r.ParseForm(); err != nil {
-		s.renderLogin(w, http.StatusBadRequest, "Incorrect password.")
+		// Counted and logged like any other failed attempt. This is the only
+		// unauthenticated endpoint, and a body that will not parse — an
+		// oversized one, most likely — would otherwise be an unlimited channel
+		// that never trips the limiter and leaves no trace.
+		s.limiter.RecordFailure(ip)
+		s.logger.Warn("unreadable login form", "ip", ip, "error", err)
+		s.renderLogin(w, http.StatusBadRequest, "Could not read the login form.")
 		return
 	}
 

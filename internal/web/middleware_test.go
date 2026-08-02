@@ -121,7 +121,7 @@ func TestRequireSessionRejectsATamperedCookie(t *testing.T) {
 	})
 
 	c := e.sessionCookie(t)
-	c.Value = c.Value[:len(c.Value)-1] + "X"
+	c.Value = tamperCookieValue(c.Value)
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.AddCookie(c)
 

@@ -74,6 +74,25 @@ func (e *testEnv) csrfToken(t *testing.T, c *http.Cookie) string {
 	return e.srv.sessions.CSRFToken(nonce)
 }
 
+// tamperCookieValue returns v with one character changed, guaranteed to fail
+// verification.
+//
+// It mutates the first character of the payload rather than the last character
+// of the signature, which is the obvious thing to reach for and is wrong: a
+// 32-byte HMAC encodes to 43 base64 characters whose final one carries only
+// four significant bits, and Go's decoder ignores the non-canonical padding
+// bits. Replacing that character therefore decodes to the identical signature
+// about 6% of the time, and the supposedly tampered cookie verifies fine.
+func tamperCookieValue(v string) string {
+	b := []byte(v)
+	if b[0] == 'A' {
+		b[0] = 'B'
+	} else {
+		b[0] = 'A'
+	}
+	return string(b)
+}
+
 func do(t *testing.T, h http.Handler, r *http.Request) *httptest.ResponseRecorder {
 	t.Helper()
 	w := httptest.NewRecorder()

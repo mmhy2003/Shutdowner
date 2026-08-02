@@ -208,6 +208,29 @@ func TestRateLimitMessageIsSingularForOneMinute(t *testing.T) {
 	}
 }
 
+func TestUnreadableLoginFormIsCountedAndLogged(t *testing.T) {
+	e := newTestEnv(t)
+	setIP := func(r *http.Request) { r.Header.Set("CF-Connecting-IP", "203.0.113.44") }
+
+	oversized := func() *httptest.ResponseRecorder {
+		form := url.Values{"password": {strings.Repeat("x", 16<<10)}}
+		return postForm(t, e.handler, "/login", form, setIP)
+	}
+
+	// Five unreadable bodies must consume the same allowance a wrong password
+	// would; otherwise this is an uncounted channel on the one unauthenticated
+	// endpoint.
+	for i := 1; i <= 5; i++ {
+		if res := oversized(); res.Code != http.StatusBadRequest {
+			t.Fatalf("attempt %d: status = %d, want 400", i, res.Code)
+		}
+	}
+
+	if res := oversized(); res.Code != http.StatusTooManyRequests {
+		t.Errorf("sixth attempt status = %d, want 429 — unreadable bodies are not being counted", res.Code)
+	}
+}
+
 func TestOversizedLoginBodyIsRejected(t *testing.T) {
 	e := newTestEnv(t)
 
@@ -236,7 +259,7 @@ func TestLoginFormClearsAnUnusableCookie(t *testing.T) {
 	e := newTestEnv(t)
 
 	c := e.sessionCookie(t)
-	c.Value = c.Value[:len(c.Value)-1] + "X"
+	c.Value = tamperCookieValue(c.Value)
 	r := httptest.NewRequest(http.MethodGet, "/login", nil)
 	r.AddCookie(c)
 
