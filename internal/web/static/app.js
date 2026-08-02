@@ -86,10 +86,13 @@
     return m === 0 ? h + "h" : h + "h " + m + "m";
   }
 
+  // Sliced as text, like every other reading of the PC's clock in this file.
+  // Parsing through Date() and reformatting with toLocaleTimeString(), as this
+  // used to, renders the instant in the BROWSER's zone while the "local" label
+  // implies the PC's — correct only when the two happen to agree.
   function formatClock(iso) {
-    var t = new Date(iso);
-    if (isNaN(t.getTime())) return "";
-    return t.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) + " local";
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(iso || "")) return "";
+    return iso.slice(11, 16) + " local";
   }
 
   // The countdown is rendered from a locally computed deadline so it ticks
@@ -156,9 +159,16 @@
     var missed = el("missed");
     if (data.missed) {
       var mLabel = LABELS[data.missed.action] || data.missed.action;
+      // A miss can span days once the machine has been asleep or the service
+      // down, so a bare time is ambiguous — only drop the date when it is
+      // unmistakably today. The comparison is on the date characters as text,
+      // the same rule as everywhere else the PC's clock is read, so the PC's
+      // own idea of "today" decides rather than the browser's. Without a
+      // reading of the PC's clock yet, showing the date is the safer default.
+      var sameDay = state.localTime && state.localTime.slice(0, 10) === data.missed.wasDueAt.slice(0, 10);
+      var when = sameDay ? data.missed.wasDueAt.slice(11, 16) : data.missed.wasDueAt.slice(0, 16).replace("T", " ");
       el("missed-text").textContent =
-        mLabel + " was due at " + data.missed.wasDueAt.slice(11, 16) +
-        " and was skipped: the PC was off or asleep.";
+        mLabel + " was due at " + when + " and was skipped: the PC was off or asleep.";
       missed.classList.remove("hidden");
     } else {
       missed.classList.add("hidden");
@@ -197,12 +207,25 @@
     return checked ? checked.value : "now";
   }
 
+  // #when-in-value's max is only correct for whichever unit is selected: 10080
+  // minutes and 168 hours are both the same 7-day server limit
+  // (action.MaxHorizon), but the HTML max="10080" written into the template is
+  // right for minutes only. Left unsynced, "hours" would let the browser's own
+  // constraint validation wave through a value the server still refuses.
+  function syncWhenInMax() {
+    var value = el("when-in-value");
+    var max = el("when-in-unit").value === "60" ? 10080 : 168;
+    value.max = max;
+    if (parseInt(value.value, 10) > max) value.value = String(max);
+  }
+
   // Reset to Now, bound the picker to the PC's clock, and say so when the phone
   // holding the browser disagrees with the machine about what time it is.
   function resetWhen() {
     document.querySelector('input[name="when"][value="now"]').checked = true;
     el("when-in-value").value = "1";
     el("when-in-unit").value = "3600";
+    syncWhenInMax();
     el("when-now-label").textContent =
       defaultDelay > 0 ? "Now (" + defaultDelay + "s countdown)" : "Now";
 
@@ -241,17 +264,27 @@
       case "in":
         var n = parseInt(el("when-in-value").value, 10);
         if (!(n > 0)) throw new Error("Enter how long to wait.");
-        return { delaySeconds: n * parseInt(el("when-in-unit").value, 10) };
+        var seconds = n * parseInt(el("when-in-unit").value, 10);
+        // The max attribute tracks the unit (see syncWhenInMax), but an
+        // attribute is only ever a suggestion to the browser, not a guarantee —
+        // so the same 7-day cap the server enforces (action.MaxHorizon) is
+        // checked again here, worded in what the operator typed rather than
+        // the API's raw seconds.
+        if (seconds > 604800) throw new Error("A schedule can reach at most 7 days ahead.");
+        return { delaySeconds: seconds };
       case "at":
         var at = el("when-at").value;
         if (!at) throw new Error("Pick a date and time.");
-        // The control emits seconds when the user types them; the server wants
-        // minute precision.
+        // With no step attribute a datetime-local input's own granularity is
+        // already minutes; slicing to 16 characters is defensive, not a
+        // workaround for anything the control actually emits.
         return { at: at.slice(0, 16) };
       default:
         return {};
     }
   }
+
+  el("when-in-unit").addEventListener("change", syncWhenInMax);
 
   var dialog = el("confirm");
   var chosenAction = null;
