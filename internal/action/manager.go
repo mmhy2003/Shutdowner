@@ -27,9 +27,9 @@ const (
 // to idle on its own, so no dismissal endpoint is needed.
 const FailedRetention = 60 * time.Second
 
-// TickInterval is how often the manager compares the wall clock against the
-// deadline. A tick is a mutex acquisition and a time comparison, so the cost is
-// nothing next to not having to reason about the monotonic clock.
+// TickInterval is how often the manager compares now against the deadline. A
+// tick is a mutex acquisition and a time comparison, so the cost is nothing
+// next to the alternative of re-arming a timer across a suspend/resume.
 const TickInterval = time.Second
 
 var (
@@ -131,15 +131,18 @@ func (m *Manager) Schedule(ctx context.Context, a power.Action, force bool, fire
 	m.id = m.newID()
 	m.action = a
 	m.force = force
-	m.firesAt = firesAt
+	// Round(0) strips the monotonic reading. Go compares two monotonic-carrying
+	// times on the monotonic clock alone, and that clock stops while Windows is
+	// suspended — which is the exact case this deadline exists to survive.
+	m.firesAt = firesAt.Round(0)
 	m.lastErr = ""
 
 	return m.pendingLocked(m.now()), nil
 }
 
-// Tick fires the pending action if its deadline has arrived. Start calls it
-// once a second; tests call it directly, which is why it takes no arguments and
-// reads the clock itself.
+// Tick fires the pending action if its deadline has arrived. Start calls it on
+// the interval Start was given; tests call it directly, which is why it takes
+// no arguments and reads the clock itself.
 func (m *Manager) Tick() {
 	m.mu.Lock()
 	if m.state != StatePending || m.now().Before(m.firesAt) {
@@ -167,12 +170,20 @@ func (m *Manager) Tick() {
 	m.lastErr = ""
 }
 
-// Start runs the tick loop until the returned stop function is called.
+// Start runs the tick loop until the returned stop function is called. A
+// non-positive interval falls back to TickInterval rather than panicking,
+// since time.NewTicker itself panics on one and the Windows service manager is
+// not a caller worth crashing over a bad config value here.
 //
 // Stopping does not wait for an action already executing: a sleep blocks inside
 // the controller for the entire suspension, and holding service shutdown open
-// for that would be worse than letting the goroutine end on its own.
+// for that would be worse than letting the goroutine end on its own. stop is
+// wrapped in a sync.Once because Windows service control can deliver both a
+// stop and a shutdown request, and closing done twice would panic.
 func (m *Manager) Start(interval time.Duration) (stop func()) {
+	if interval <= 0 {
+		interval = TickInterval
+	}
 	done := make(chan struct{})
 	go func() {
 		t := time.NewTicker(interval)
@@ -186,7 +197,8 @@ func (m *Manager) Start(interval time.Duration) (stop func()) {
 			}
 		}
 	}()
-	return func() { close(done) }
+	var once sync.Once
+	return func() { once.Do(func() { close(done) }) }
 }
 
 // execute runs the controller and turns a panic into an ordinary error. This

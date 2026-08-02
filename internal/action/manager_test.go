@@ -61,6 +61,13 @@ func TestScheduleFromIdle(t *testing.T) {
 	if p.RemainingSeconds != 45 {
 		t.Errorf("RemainingSeconds = %d, want 45", p.RemainingSeconds)
 	}
+	wantFiresAt := h.now.Add(45 * time.Second)
+	gotFiresAt, err := time.Parse(time.RFC3339, p.FiresAtLocal)
+	if err != nil {
+		t.Errorf("FiresAtLocal = %q, does not parse as RFC3339: %v", p.FiresAtLocal, err)
+	} else if !gotFiresAt.Equal(wantFiresAt) {
+		t.Errorf("FiresAtLocal = %q, want the instant %v", p.FiresAtLocal, wantFiresAt)
+	}
 	if s := h.mgr.Status(); s.State != StatePending {
 		t.Errorf("State = %q, want pending", s.State)
 	}
@@ -116,8 +123,14 @@ func TestFiringExecutesTheAction(t *testing.T) {
 	h.advance(45 * time.Second)
 
 	calls := h.fake.Calls()
-	if len(calls) != 1 || calls[0].Action != power.ActionRestart || calls[0].Force {
-		t.Errorf("Calls() = %+v, want one graceful restart", calls)
+	if len(calls) != 1 {
+		t.Fatalf("len(Calls()) = %d, want 1", len(calls))
+	}
+	if calls[0].Action != power.ActionRestart || calls[0].Force {
+		t.Errorf("Calls()[0] = %+v, want restart without force", calls[0])
+	}
+	if s := h.mgr.Status(); s.State != StateIdle {
+		t.Errorf("State = %q, want idle after a successful action", s.State)
 	}
 }
 
@@ -269,6 +282,20 @@ func TestTickBeforeTheDeadlineDoesNothing(t *testing.T) {
 	}
 }
 
+func TestScheduleStripsTheMonotonicReading(t *testing.T) {
+	m := New(power.NewFake())
+	firesAt := time.Now().Add(time.Hour) // monotonic-carrying, as the API layer's is
+	if _, err := m.Schedule(context.Background(), power.ActionShutdown, true, firesAt); err != nil {
+		t.Fatalf("Schedule() error = %v", err)
+	}
+	m.mu.Lock()
+	stored := m.firesAt
+	m.mu.Unlock()
+	if stored.Round(0) != stored {
+		t.Error("firesAt kept its monotonic reading, so a deadline that passed while the machine was suspended will never fire")
+	}
+}
+
 // blockingController holds Execute open so the Executing state is observable.
 type blockingController struct {
 	release chan struct{}
@@ -325,6 +352,35 @@ func TestAPanicDuringExecutionBecomesAFailure(t *testing.T) {
 	if _, err := m.Schedule(context.Background(), power.ActionRestart, true, now); err != nil {
 		t.Errorf("Schedule() after a panic error = %v, want nil", err)
 	}
+}
+
+// TestStartStopDoesNotBlockOnAnExecutingAction pins that stop() returns even
+// while the tick goroutine is wedged inside Execute for a sleep/hibernate that
+// has not resumed yet. A stop that waited for the goroutine to exit would hang
+// service shutdown for as long as the machine stays suspended.
+func TestStartStopDoesNotBlockOnAnExecutingAction(t *testing.T) {
+	ctrl := &blockingController{release: make(chan struct{}), entered: make(chan struct{})}
+	m := New(ctrl)
+
+	if _, err := m.Schedule(context.Background(), power.ActionShutdown, true, time.Now()); err != nil {
+		t.Fatalf("Schedule() error = %v", err)
+	}
+
+	stop := m.Start(time.Millisecond)
+	<-ctrl.entered
+
+	stopped := make(chan struct{})
+	go func() {
+		stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stop() blocked behind a Tick stuck inside Execute")
+	}
+
+	close(ctrl.release)
 }
 
 func TestScheduleRejectedWhileExecuting(t *testing.T) {

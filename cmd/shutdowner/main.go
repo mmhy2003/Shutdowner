@@ -228,10 +228,14 @@ func runServer() error {
 		ctrl = power.NewFake()
 	}
 
+	actions := action.New(ctrl)
+	stopTicking := actions.Start(action.TickInterval)
+	defer stopTicking()
+
 	srv, err := web.New(web.Options{
 		Sessions:     auth.NewSessionManager(cfg.SessionSecret, cfg.SessionTTL),
 		Limiter:      auth.NewLimiter(auth.DefaultPerIPLimit, auth.DefaultGlobalLimit, auth.DefaultWindow),
-		Actions:      action.New(ctrl),
+		Actions:      actions,
 		Power:        ctrl,
 		Logger:       logger,
 		PasswordHash: cfg.PasswordHash,
@@ -249,7 +253,7 @@ func runServer() error {
 			// The tunnel is the only client, but a slow-header or slow-body
 			// attack would still tie up connections without these. WriteTimeout
 			// is safe at 30s because no handler blocks: a power action is
-			// executed by the action manager's timer goroutine, never inside a
+			// executed by the action manager's tick goroutine, never inside a
 			// request.
 			ReadHeaderTimeout: 10 * time.Second,
 			ReadTimeout:       20 * time.Second,
