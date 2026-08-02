@@ -5,8 +5,11 @@ import (
 	"encoding/binary"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
+
+	"shutdowner/internal/power"
 )
 
 func TestStaticAssetsAreServed(t *testing.T) {
@@ -122,6 +125,39 @@ func TestDashboardShowsTheLogo(t *testing.T) {
 	}
 	if !bytes.HasPrefix(asset.Body.Bytes(), []byte("\x89PNG\r\n\x1a\n")) {
 		t.Error("the body does not start with a PNG signature")
+	}
+}
+
+// actionColour matches the per-action colour declarations in app.css.
+var actionColour = regexp.MustCompile(`\.action\[data-action="([a-z]+)"\]\s*\{\s*--action:\s*([^;]+);`)
+
+// Every action the dashboard offers gets a colour, and no two share one. Adding
+// an action without styling it would otherwise ship a button that silently
+// falls back to looking like Sleep.
+func TestEveryActionHasItsOwnColour(t *testing.T) {
+	css, err := staticFS.ReadFile("static/app.css")
+	if err != nil {
+		t.Fatalf("reading app.css: %v", err)
+	}
+
+	colours := map[power.Action]string{}
+	for _, m := range actionColour.FindAllStringSubmatch(string(css), -1) {
+		colours[power.Action(m[1])] = strings.TrimSpace(m[2])
+	}
+
+	usedBy := map[string]power.Action{}
+	for _, a := range []power.Action{
+		power.ActionShutdown, power.ActionRestart, power.ActionSleep, power.ActionHibernate,
+	} {
+		colour, ok := colours[a]
+		if !ok {
+			t.Errorf("app.css sets no --action colour for %q", a)
+			continue
+		}
+		if other, clash := usedBy[colour]; clash {
+			t.Errorf("%q and %q are both %s", a, other, colour)
+		}
+		usedBy[colour] = a
 	}
 }
 

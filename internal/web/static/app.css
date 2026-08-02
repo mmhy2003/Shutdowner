@@ -8,6 +8,10 @@
   --accent: #2563eb;
   --danger: #b91c1c;
   --ok: #15803d;
+  /* Shutdown and sleep take --danger and --accent, so only the other two
+     actions need a colour of their own. */
+  --restart: #b45309;
+  --hibernate: #7c3aed;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -20,6 +24,8 @@
     --accent: #60a5fa;
     --danger: #f87171;
     --ok: #4ade80;
+    --restart: #fbbf24;
+    --hibernate: #c084fc;
   }
 }
 
@@ -106,6 +112,30 @@ button {
 }
 button:hover:not(:disabled) { border-color: var(--accent); }
 button:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* Each action carries its own hue, so the four are told apart by more than
+   reading four similar words on a phone. The colour goes through a custom
+   property rather than being written into each rule, so the outline, the label
+   and the hover wash cannot drift apart. */
+.action[data-action="shutdown"] { --action: var(--danger); }
+.action[data-action="restart"] { --action: var(--restart); }
+.action[data-action="sleep"] { --action: var(--accent); }
+.action[data-action="hibernate"] { --action: var(--hibernate); }
+
+.action {
+  /* An action with no colour of its own falls back to the accent rather than
+     to an invalid value, which would drop the label to the body colour. */
+  --action: var(--accent);
+  color: var(--action);
+  border-color: var(--action);
+}
+
+/* Restated because the generic button:hover moves the border to the accent,
+   which would pull three of the four away from their own colour. */
+.action:hover:not(:disabled) {
+  border-color: var(--action);
+  background: color-mix(in srgb, var(--action) 12%, transparent);
+}
 
 button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 button.danger { color: var(--danger); border-color: var(--danger); }
