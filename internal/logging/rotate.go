@@ -3,6 +3,7 @@
 package logging
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -12,6 +13,9 @@ const (
 	DefaultMaxBytes int64 = 5 << 20 // 5 MB
 	DefaultKeep           = 2
 )
+
+// ErrClosed is returned by Write after the writer has been closed.
+var ErrClosed = errors.New("logging: writer is closed")
 
 // RotatingWriter appends to path, rolling it over to path.1, path.2 and so on
 // once it exceeds maxBytes. A Windows service has no console, so this file is
@@ -51,6 +55,10 @@ func (w *RotatingWriter) open() error {
 func (w *RotatingWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+
+	if w.f == nil {
+		return 0, ErrClosed
+	}
 
 	// A single write larger than the limit is written whole rather than split;
 	// rotating first keeps it in a file of its own.

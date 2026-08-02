@@ -1,6 +1,7 @@
 package logging
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -115,5 +116,30 @@ func TestWriteLargerThanTheLimitStillSucceeds(t *testing.T) {
 	}
 	if n != len(big) {
 		t.Errorf("Write() = %d, want %d", n, len(big))
+	}
+}
+
+func TestWriteAfterCloseReturnsError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "app.log")
+	w, err := NewRotatingWriter(path, 1024, 2)
+	if err != nil {
+		t.Fatalf("NewRotatingWriter() error = %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	// A service whose log file is its only output must not panic here.
+	n, err := w.Write([]byte("after close\n"))
+	if !errors.Is(err, ErrClosed) {
+		t.Errorf("Write() error = %v, want ErrClosed", err)
+	}
+	if n != 0 {
+		t.Errorf("Write() = %d, want 0", n)
+	}
+
+	// Close must remain idempotent.
+	if err := w.Close(); err != nil {
+		t.Errorf("second Close() error = %v, want nil", err)
 	}
 }
