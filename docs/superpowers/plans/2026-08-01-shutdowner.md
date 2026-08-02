@@ -6,14 +6,14 @@
 
 **Architecture:** One process on the target PC. `internal/power` wraps the OS calls behind a `Controller` interface, `internal/action` owns an abortable countdown state machine, `internal/web` serves an embedded server-rendered UI with signed-cookie sessions. Cloudflare Tunnel fronts it; the app binds loopback only. The `Controller` seam plus a `Fake` implementation is what lets every layer above the syscalls be developed and tested on Linux.
 
-**Tech Stack:** Go 1.24+, `html/template` + `embed.FS`, vanilla JS, `golang.org/x/crypto` (bcrypt), `golang.org/x/sys` (Win32 + service framework), `github.com/joho/godotenv`.
+**Tech Stack:** Go 1.25+, `html/template` + `embed.FS`, vanilla JS, `golang.org/x/crypto` (bcrypt), `golang.org/x/sys` (Win32 + service framework), `github.com/joho/godotenv`.
 
 **Spec:** `docs/superpowers/specs/2026-08-01-remote-windows-power-control-design.md`
 
 ## Global Constraints
 
 - **Module path:** `shutdowner`. All internal imports are `shutdowner/internal/...`.
-- **Go version:** go.mod declares `go 1.24`. Development toolchain is go1.26.5.
+- **Go version:** go.mod declares `go 1.25.0`. Development toolchain is go1.26.5. The floor is 1.25.0 rather than something more conservative because `golang.org/x/crypto` and `golang.org/x/sys` both declare `go 1.25.0` themselves, and Go requires the main module's floor to be at least as high as any dependency's. This only bites once a dependency is actually imported, so Task 1 builds at a lower floor and Task 2 does not.
 - **Exactly three external dependencies:** `golang.org/x/crypto`, `golang.org/x/sys`, `github.com/joho/godotenv`. Do not add a fourth — log rotation and no-echo password entry are hand-rolled specifically to avoid one.
 - **Never resolve paths from the working directory.** A LocalSystem service starts in `C:\Windows\System32`. `.env` and the log file resolve from `os.Executable()`.
 - **Loopback-only bind** unless `--allow-public-bind` is passed. Startup fails otherwise.
