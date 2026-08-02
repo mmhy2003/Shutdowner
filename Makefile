@@ -3,6 +3,7 @@ DIST := dist
 BIN := $(DIST)/shutdowner.exe
 LOGO := logo.png
 ICON := assets/icon.ico
+FAVICON := internal/web/static/favicon.ico
 # Naming a .syso for an explicit GOOS_GOARCH is what keeps the Go linker from
 # feeding an amd64 COFF object to a build for any other target.
 SYSO := cmd/shutdowner/rsrc_windows_amd64.syso
@@ -44,12 +45,18 @@ build-windows:
 run-dev:
 	$(GO) run ./cmd/shutdowner --console --fake-power --config ./.env.dev
 
-# Rebuilds the application icon from $(LOGO). Both outputs are committed and the
-# Go toolchain links the .syso in on its own, so build-windows does not depend
-# on this: it only needs running when the logo changes, and it is the only
-# target that reaches the network (for rsrc, on a cold module cache).
+# Rebuilds the executable's icon and the web UI's favicon from $(LOGO). Every
+# output is committed, the Go toolchain links the .syso in on its own and
+# go:embed picks the favicon up, so build-windows does not depend on this: it
+# only needs running when the logo changes, and it is the only target that
+# reaches the network (for rsrc, on a cold module cache).
+#
+# The favicon carries only the sizes a browser has a use for, and stores them as
+# PNG rather than as the DIBs the Windows shell prefers, which takes it from
+# 15 KB to 4 KB.
 icon:
 	$(GO) run ./tools/mkicon -in $(LOGO) -out $(ICON)
+	$(GO) run ./tools/mkicon -in $(LOGO) -out $(FAVICON) -sizes 16,32,48 -dib-max 0
 	$(GO) run $(RSRC) -ico $(ICON) -arch amd64 -o $(SYSO)
 
 clean:

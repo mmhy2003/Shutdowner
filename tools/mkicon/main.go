@@ -1,8 +1,10 @@
-// Command mkicon renders logo.png into the multi-resolution assets/icon.ico
-// that is linked into shutdowner.exe as its application icon.
+// Command mkicon renders logo.png into the multi-resolution .ico files the app
+// is branded with: assets/icon.ico, which is linked into shutdowner.exe as its
+// application icon, and internal/web/static/favicon.ico, which the web UI
+// serves. They differ only in which sizes and which entry encoding they carry.
 //
-// The .ico and the .syso built from it are both committed, so this only needs
-// re-running when the logo changes:
+// Every output is committed, so this only needs re-running when the logo
+// changes:
 //
 //	make icon
 //
@@ -19,6 +21,7 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"flag"
 	"fmt"
 	"image"
@@ -26,6 +29,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -37,12 +41,19 @@ var (
 	flagSmall    = flag.String("small", "383,150,700,470", "x0,y0,x1,y1 of the artwork used at -small-max and below")
 	flagSmallMax = flag.Int("small-max", 32, "largest icon size that uses the -small artwork")
 	flagPad      = flag.Float64("pad", 0.02, "margin left around the artwork, as a fraction of the icon side")
-)
 
-// The sizes Windows asks for: 16 in the title bar and tree views, 32 on the
-// desktop, 48 in Explorer's medium view, 256 for extra large view and the
-// Alt-Tab switcher. The others are the DPI-scaled variants of those four.
-var sizes = []int{16, 20, 24, 32, 40, 48, 64, 128, 256}
+	// The default is what Windows asks for: 16 in the title bar and tree views,
+	// 32 on the desktop, 48 in Explorer's medium view, 256 for the extra large
+	// view and the Alt-Tab switcher, plus the DPI-scaled variants of those.
+	flagSizes = flag.String("sizes", "16,20,24,32,40,48,64,128,256", "comma-separated icon sizes to write")
+
+	// The shell asks for the small sizes constantly and reads them from disk
+	// each time, so they are left uncompressed; only the two large entries,
+	// where the saving is worth it, are stored as PNG. A favicon is fetched once
+	// and cached by the browser, and every browser that has shipped this decade
+	// reads PNG entries, so it passes 0 here and comes out a quarter of the size.
+	flagDIBMax = flag.Int("dib-max", 64, "largest size stored as an uncompressed DIB; larger ones are stored as PNG")
+)
 
 func main() {
 	flag.Parse()
@@ -53,6 +64,10 @@ func main() {
 }
 
 func run() error {
+	sizes, err := parseSizes(*flagSizes)
+	if err != nil {
+		return fmt.Errorf("-sizes: %w", err)
+	}
 	full, err := parseRect(*flagFull)
 	if err != nil {
 		return fmt.Errorf("-full: %w", err)
@@ -92,7 +107,7 @@ func run() error {
 			return err
 		}
 	}
-	data, err := encodeICO(images)
+	data, err := encodeICO(images, *flagDIBMax)
 	if err != nil {
 		return err
 	}
@@ -110,6 +125,28 @@ func readPNG(path string) (image.Image, error) {
 	}
 	defer f.Close()
 	return png.Decode(f)
+}
+
+// parseSizes reads a comma-separated size list, sorted ascending so that the
+// directory entries come out in a predictable order. The one-byte width field
+// in an .ico directory entry is what caps a size at 256.
+func parseSizes(s string) ([]int, error) {
+	var sizes []int
+	for _, p := range strings.Split(s, ",") {
+		n, err := strconv.Atoi(strings.TrimSpace(p))
+		if err != nil {
+			return nil, fmt.Errorf("%q is not a number", p)
+		}
+		if n < 1 || n > 256 {
+			return nil, fmt.Errorf("%d is outside 1-256", n)
+		}
+		sizes = append(sizes, n)
+	}
+	if len(sizes) == 0 {
+		return nil, errors.New("no sizes given")
+	}
+	slices.Sort(sizes)
+	return slices.Compact(sizes), nil
 }
 
 // parseRect reads an "x0,y0,x1,y1" flag value as a half-open rectangle.
@@ -200,12 +237,6 @@ func render(src image.Image, art image.Rectangle, size int, pad float64) *image.
 	return dst
 }
 
-// dibCutoff is the largest size stored as an uncompressed DIB. PNG-compressed
-// entries have been read by the shell since Vista and save around 40 KB here,
-// but the sizes the shell asks for most often are cheap to store uncompressed,
-// and a 32bpp DIB is the one encoding no icon reader has ever disagreed about.
-const dibCutoff = 64
-
 type iconDirEntry struct {
 	Width       byte // 0 means 256; the field is one byte wide
 	Height      byte
@@ -217,13 +248,14 @@ type iconDirEntry struct {
 	ImageOffset uint32
 }
 
-// encodeICO packs the rendered images into an .ico file. Sizes must be in the
-// same order as they should appear in the directory.
-func encodeICO(images []*image.NRGBA) ([]byte, error) {
+// encodeICO packs the rendered images into an .ico file, storing entries up to
+// dibMax pixels as uncompressed DIBs and the rest as PNG. The images must
+// already be in the order they should appear in the directory.
+func encodeICO(images []*image.NRGBA, dibMax int) ([]byte, error) {
 	blobs := make([][]byte, len(images))
 	for i, img := range images {
 		var err error
-		if img.Bounds().Dx() > dibCutoff {
+		if img.Bounds().Dx() > dibMax {
 			blobs[i], err = encodePNG(img)
 		} else {
 			blobs[i] = encodeDIB(img)

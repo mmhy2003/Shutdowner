@@ -79,6 +79,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/action", limitBody(maxRequestBody, s.requireSession(s.requireCSRF(s.handleAction))))
 	mux.HandleFunc("POST /api/abort", limitBody(maxRequestBody, s.requireSession(s.requireCSRF(s.handleAbort))))
 	mux.HandleFunc("GET /healthz", s.handleHealth)
+	mux.HandleFunc("GET /favicon.ico", handleFavicon)
 	mux.Handle("GET /static/", s.static)
 	return securityHeaders(recoverPanic(s.logger, mux))
 }
