@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -87,6 +88,19 @@ func WithIDFunc(f func() string) Option {
 	return func(m *Manager) { m.newID = f }
 }
 
+// WithStore persists the schedule so it survives a restart. Without it the
+// manager keeps everything in memory, which is what the tests want.
+func WithStore(s Store) Option {
+	return func(m *Manager) { m.store = s }
+}
+
+// WithLogger gives the manager somewhere to report a persistence failure. It
+// cannot return one: a schedule that will not survive a restart is worth much
+// more than a refused request, so the write failing must not fail the action.
+func WithLogger(l *slog.Logger) Option {
+	return func(m *Manager) { m.logger = l }
+}
+
 // Manager holds the single in-flight action. The countdown lives here rather
 // than in shutdown.exe /t because Windows cannot cancel a pending sleep or
 // hibernate, so relying on shutdown /a would give Abort for only two of the
@@ -95,10 +109,12 @@ func WithIDFunc(f func() string) Option {
 // A pending action is persisted by the store and restored at startup; see
 // Restore.
 type Manager struct {
-	ctrl power.Controller
+	ctrl  power.Controller
+	store Store
 
-	now   func() time.Time
-	newID func() string
+	now    func() time.Time
+	newID  func() string
+	logger *slog.Logger
 
 	mu       sync.Mutex
 	state    State
@@ -113,10 +129,12 @@ type Manager struct {
 
 func New(ctrl power.Controller, opts ...Option) *Manager {
 	m := &Manager{
-		ctrl:  ctrl,
-		now:   time.Now,
-		newID: randomID,
-		state: StateIdle,
+		ctrl:   ctrl,
+		store:  NopStore{},
+		now:    time.Now,
+		newID:  randomID,
+		logger: slog.New(slog.DiscardHandler),
+		state:  StateIdle,
 	}
 	for _, o := range opts {
 		o(m)
@@ -156,7 +174,30 @@ func (m *Manager) Schedule(ctx context.Context, a power.Action, force bool, fire
 	m.firesAt = firesAt.Round(0)
 	m.lastErr = ""
 
-	return m.pendingLocked(m.now()), nil
+	pending := m.pendingLocked(m.now())
+	m.persistLocked()
+	return pending, nil
+}
+
+// persistLocked writes the current state, logging rather than returning a
+// failure. Losing the file means losing the schedule across a restart, which is
+// worth a warning and nothing more.
+func (m *Manager) persistLocked() {
+	var p Persisted
+	if m.state == StatePending {
+		p.Pending = &PersistedPending{ID: m.id, Action: m.action, Force: m.force, FiresAt: m.firesAt}
+	}
+	p.Missed = m.missed
+
+	var err error
+	if p.Pending == nil && p.Missed == nil {
+		err = m.store.Clear()
+	} else {
+		err = m.store.Save(p)
+	}
+	if err != nil {
+		m.logger.Warn("persisting the schedule; it will not survive a restart", "error", err)
+	}
 }
 
 // Tick fires the pending action if its deadline has arrived. Start calls it on
@@ -197,6 +238,7 @@ func (m *Manager) Tick() {
 	// never reach here at all: the process dies mid-call.
 	m.state = StateIdle
 	m.lastErr = ""
+	m.persistLocked()
 }
 
 // Start runs the tick loop until the returned stop function is called. A
@@ -261,6 +303,7 @@ func (m *Manager) Abort(id string) error {
 	}
 	m.state = StateIdle
 	m.id = ""
+	m.persistLocked()
 	return nil
 }
 
@@ -269,6 +312,7 @@ func (m *Manager) missLocked() {
 	m.missed = &Missed{Action: m.action, WasDueAt: m.firesAt.Format(time.RFC3339)}
 	m.state = StateMissed
 	m.id = ""
+	m.persistLocked()
 }
 
 // Dismiss clears a missed record. It is deliberately idempotent: two browser
@@ -280,6 +324,43 @@ func (m *Manager) Dismiss() {
 		m.state = StateIdle
 	}
 	m.missed = nil
+	m.persistLocked()
+}
+
+// Restore reloads a schedule left by a previous run. A deadline still ahead, or
+// less than MissedGrace past, is re-armed; anything older becomes a missed
+// record. It returns an error for the caller to log, having left the manager
+// idle and usable — a bad state file must never stop the service from starting.
+func (m *Manager) Restore() error {
+	p, err := m.store.Load()
+	if err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.missed = p.Missed
+	if m.missed != nil {
+		m.state = StateMissed
+	}
+	if p.Pending == nil {
+		return nil
+	}
+
+	now := m.now()
+	if now.Sub(p.Pending.FiresAt) > MissedGrace {
+		m.action = p.Pending.Action
+		m.firesAt = p.Pending.FiresAt
+		m.missLocked()
+		return nil
+	}
+
+	m.state = StatePending
+	m.id = p.Pending.ID
+	m.action = p.Pending.Action
+	m.force = p.Pending.Force
+	m.firesAt = p.Pending.FiresAt
+	return nil
 }
 
 func (m *Manager) Status() Status {

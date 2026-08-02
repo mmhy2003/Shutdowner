@@ -95,6 +95,24 @@ func configPath() (string, error) {
 	return filepath.Join(dir, ".env"), nil
 }
 
+// schedulePath puts the state file beside the .env it belongs to, so a
+// --config pointing elsewhere keeps its schedule with it rather than in
+// whatever directory the service happened to start in.
+func schedulePath(configFlag string) (string, error) {
+	if configFlag != "" {
+		abs, err := filepath.Abs(configFlag)
+		if err != nil {
+			return "", fmt.Errorf("resolving --config path: %w", err)
+		}
+		return filepath.Join(filepath.Dir(abs), "schedule.json"), nil
+	}
+	dir, err := config.ExeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "schedule.json"), nil
+}
+
 func runInit() error {
 	path, err := configPath()
 	if err != nil {
@@ -228,7 +246,20 @@ func runServer() error {
 		ctrl = power.NewFake()
 	}
 
-	actions := action.New(ctrl)
+	statePath, err := schedulePath(*flagConfig)
+	if err != nil {
+		return err
+	}
+	actions := action.New(ctrl,
+		action.WithStore(action.NewFileStore(statePath)),
+		action.WithLogger(logger),
+	)
+	if err := actions.Restore(); err != nil {
+		// A corrupt or unreadable state file loses the schedule, which is a
+		// great deal better than refusing to start the thing that answers the
+		// door.
+		logger.Warn("restoring the saved schedule", "path", statePath, "error", err)
+	}
 	stopTicking := actions.Start(action.TickInterval)
 	defer stopTicking()
 

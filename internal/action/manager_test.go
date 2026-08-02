@@ -481,3 +481,92 @@ func TestDismissClearsAMissedRecord(t *testing.T) {
 	// Idempotent: a second tab racing the first must not produce an error.
 	h.mgr.Dismiss()
 }
+
+// memStore is an in-memory Store, so manager tests never touch a disk.
+type memStore struct {
+	saved Persisted
+	err   error
+}
+
+func (s *memStore) Load() (Persisted, error) { return s.saved, s.err }
+func (s *memStore) Save(p Persisted) error   { s.saved = p; return nil }
+func (s *memStore) Clear() error             { s.saved = Persisted{}; return nil }
+
+func TestScheduleIsPersistedAndClearedOnAbort(t *testing.T) {
+	h := newHarness(t)
+	store := &memStore{}
+	h.mgr = New(h.fake, WithClock(func() time.Time { return h.now }),
+		WithIDFunc(func() string { return "id-a" }), WithStore(store))
+
+	p, err := h.schedule(t, power.ActionShutdown, true, time.Hour)
+	if err != nil {
+		t.Fatalf("Schedule() error = %v", err)
+	}
+	if store.saved.Pending == nil || store.saved.Pending.ID != p.ID {
+		t.Fatalf("saved = %+v, want the pending action", store.saved)
+	}
+
+	if err := h.mgr.Abort(p.ID); err != nil {
+		t.Fatalf("Abort() error = %v", err)
+	}
+	if store.saved.Pending != nil {
+		t.Error("aborting did not clear the persisted schedule")
+	}
+}
+
+func TestRestoreReArmsADeadlineStillAhead(t *testing.T) {
+	h := newHarness(t)
+	store := &memStore{saved: Persisted{Pending: &PersistedPending{
+		ID: "id-restored", Action: power.ActionShutdown, Force: true,
+		FiresAt: h.now.Add(time.Hour),
+	}}}
+	h.mgr = New(h.fake, WithClock(func() time.Time { return h.now }), WithStore(store))
+
+	if err := h.mgr.Restore(); err != nil {
+		t.Fatalf("Restore() error = %v", err)
+	}
+
+	s := h.mgr.Status()
+	if s.State != StatePending || s.Pending == nil || s.Pending.ID != "id-restored" {
+		t.Fatalf("Status() = %+v, want the restored action pending", s)
+	}
+	h.advance(time.Hour)
+	if len(h.fake.Calls()) != 1 {
+		t.Error("the restored action did not fire at its deadline")
+	}
+}
+
+func TestRestoreMissesADeadlineLongPast(t *testing.T) {
+	h := newHarness(t)
+	store := &memStore{saved: Persisted{Pending: &PersistedPending{
+		ID: "id-stale", Action: power.ActionShutdown, Force: true,
+		FiresAt: h.now.Add(-2 * time.Hour),
+	}}}
+	h.mgr = New(h.fake, WithClock(func() time.Time { return h.now }), WithStore(store))
+
+	if err := h.mgr.Restore(); err != nil {
+		t.Fatalf("Restore() error = %v", err)
+	}
+
+	if len(h.fake.Calls()) != 0 {
+		t.Fatal("a deadline missed while the service was down was executed at startup")
+	}
+	s := h.mgr.Status()
+	if s.State != StateMissed || s.Missed == nil || s.Missed.Action != power.ActionShutdown {
+		t.Errorf("Status() = %+v, want a missed shutdown", s)
+	}
+}
+
+func TestRestoreReportsAStoreFailure(t *testing.T) {
+	h := newHarness(t)
+	store := &memStore{err: errors.New("corrupt")}
+	h.mgr = New(h.fake, WithClock(func() time.Time { return h.now }), WithStore(store))
+
+	if err := h.mgr.Restore(); err == nil {
+		t.Error("Restore() error = nil, want the corrupt state reported so main can log it")
+	}
+	// The manager must still be usable: a bad state file cannot stop the service.
+	if s := h.mgr.Status(); s.State != StateIdle {
+		t.Errorf("State = %q, want idle after a failed restore", s.State)
+	}
+}
