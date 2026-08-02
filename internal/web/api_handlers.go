@@ -24,12 +24,17 @@ type statusResponse struct {
 	Capabilities power.Capabilities `json:"capabilities"`
 	State        action.State       `json:"state"`
 	Pending      *action.Pending    `json:"pending"`
+	Missed       *action.Missed     `json:"missed"`
 	Error        string             `json:"error"`
 }
 
 type actionRequest struct {
 	Action power.Action `json:"action"`
 	Force  bool         `json:"force"`
+	// A pointer so that an absent field is distinguishable from an explicit
+	// zero, which is legal and means "at the next tick".
+	DelaySeconds *int   `json:"delaySeconds"`
+	At           string `json:"at"`
 }
 
 type actionResponse struct {
@@ -73,6 +78,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		Capabilities: s.capabilities(r.Context()),
 		State:        st.State,
 		Pending:      st.Pending,
+		Missed:       st.Missed,
 		Error:        st.Error,
 	})
 }
@@ -86,7 +92,13 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pending, err := s.actions.Schedule(r.Context(), req.Action, req.Force, time.Now().Add(s.delay))
+	firesAt, err := action.ResolveWhen(time.Now(), req.DelaySeconds, req.At, s.delay)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	pending, err := s.actions.Schedule(r.Context(), req.Action, req.Force, firesAt)
 	if err != nil {
 		switch {
 		case errors.Is(err, action.ErrInvalidAction), errors.Is(err, action.ErrUnsupportedAction):
@@ -102,7 +114,7 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 
 	s.logger.Info("action scheduled",
 		"action", pending.Action, "force", pending.Force,
-		"remainingSeconds", pending.RemainingSeconds, "ip", ClientIP(r))
+		"remainingSeconds", pending.RemainingSeconds, "firesAt", pending.FiresAtLocal, "ip", ClientIP(r))
 	writeJSON(w, http.StatusAccepted, actionResponse{
 		ID:               pending.ID,
 		RemainingSeconds: pending.RemainingSeconds,
@@ -121,4 +133,13 @@ func (s *Server) handleAbort(w http.ResponseWriter, r *http.Request) {
 	}
 	s.logger.Info("action aborted", "id", req.ID, "ip", ClientIP(r))
 	writeJSON(w, http.StatusOK, map[string]string{"status": "aborted"})
+}
+
+// handleDismiss clears a missed action. It takes no body and never conflicts:
+// dismissing nothing is a success, so two tabs racing produce no error anybody
+// has to explain.
+func (s *Server) handleDismiss(w http.ResponseWriter, r *http.Request) {
+	s.actions.Dismiss()
+	s.logger.Info("missed action dismissed", "ip", ClientIP(r))
+	writeJSON(w, http.StatusOK, map[string]string{"status": "dismissed"})
 }

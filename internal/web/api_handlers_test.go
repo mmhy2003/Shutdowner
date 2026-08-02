@@ -266,3 +266,79 @@ func TestOversizedAbortBodyIsRejected(t *testing.T) {
 		t.Errorf("status = %d, want 400", res.Code)
 	}
 }
+
+func TestActionAcceptsARelativeSchedule(t *testing.T) {
+	e := newTestEnv(t)
+	res := postJSON(t, e, "/api/action", `{"action":"shutdown","force":true,"delaySeconds":7200}`)
+	if res.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202: %s", res.Code, res.Body)
+	}
+	var got struct {
+		RemainingSeconds int `json:"remainingSeconds"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decoding the response: %v", err)
+	}
+	// Allow a second of slack for the clock moving during the request.
+	if got.RemainingSeconds < 7199 || got.RemainingSeconds > 7200 {
+		t.Errorf("remainingSeconds = %d, want about 7200", got.RemainingSeconds)
+	}
+}
+
+func TestActionRejectsBadSchedules(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"both timing fields", `{"action":"shutdown","delaySeconds":60,"at":"2030-01-01T00:00"}`},
+		{"a negative delay", `{"action":"shutdown","delaySeconds":-5}`},
+		{"a delay past the horizon", `{"action":"shutdown","delaySeconds":604801}`},
+		{"an unparseable at", `{"action":"shutdown","at":"tomorrow"}`},
+		{"an at in the past", `{"action":"shutdown","at":"2000-01-01T00:00"}`},
+		{"an at past the horizon", `{"action":"shutdown","at":"2099-01-01T00:00"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newTestEnv(t)
+			res := postJSON(t, e, "/api/action", tt.body)
+			if res.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400: %s", res.Code, res.Body)
+			}
+		})
+	}
+}
+
+func TestActionWithNoTimingFieldsKeepsTheConfiguredDelay(t *testing.T) {
+	e := newTestEnv(t)
+	res := postJSON(t, e, "/api/action", `{"action":"shutdown","force":true}`)
+	if res.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202: %s", res.Code, res.Body)
+	}
+	var got struct {
+		RemainingSeconds int `json:"remainingSeconds"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decoding the response: %v", err)
+	}
+	if got.RemainingSeconds < 44 || got.RemainingSeconds > 45 {
+		t.Errorf("remainingSeconds = %d, want the configured 45", got.RemainingSeconds)
+	}
+}
+
+func TestDismissIsIdempotent(t *testing.T) {
+	e := newTestEnv(t)
+	// Nothing has been missed, and it still succeeds.
+	if res := postJSON(t, e, "/api/dismiss", `{}`); res.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200: %s", res.Code, res.Body)
+	}
+}
+
+func TestDismissRequiresCSRF(t *testing.T) {
+	e := newTestEnv(t)
+	r := httptest.NewRequest(http.MethodPost, "/api/dismiss", strings.NewReader(`{}`))
+	r.AddCookie(e.sessionCookie(t))
+	r.Header.Set("Content-Type", "application/json")
+	if res := do(t, e.handler, r); res.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403 without a CSRF token", res.Code)
+	}
+}

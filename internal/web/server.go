@@ -81,6 +81,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/status", s.requireSession(s.handleStatus))
 	mux.HandleFunc("POST /api/action", limitBody(maxRequestBody, s.requireSession(s.requireCSRF(s.handleAction))))
 	mux.HandleFunc("POST /api/abort", limitBody(maxRequestBody, s.requireSession(s.requireCSRF(s.handleAbort))))
+	mux.HandleFunc("POST /api/dismiss", limitBody(maxRequestBody, s.requireSession(s.requireCSRF(s.handleDismiss))))
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /favicon.ico", handleFavicon)
 	mux.Handle("GET /static/", s.static)
