@@ -4,11 +4,9 @@ package volume
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
-	"strings"
 	"syscall"
 	"time"
 
@@ -81,6 +79,7 @@ func (systemController) run(ctx context.Context, op Op, want State) (State, erro
 		return State{}, fmt.Errorf("volume: locating the executable: %w", err)
 	}
 
+	parent := ctx
 	ctx, cancel := context.WithTimeout(ctx, helperTimeout)
 	defer cancel()
 
@@ -95,16 +94,7 @@ func (systemController) run(ctx context.Context, op Op, want State) (State, erro
 
 	out, err := cmd.Output()
 	if err != nil {
-		if ctx.Err() != nil {
-			return State{}, fmt.Errorf("volume: the helper did not finish within %s", helperTimeout)
-		}
-		var exit *exec.ExitError
-		if errors.As(err, &exit) {
-			if stderr := strings.TrimSpace(string(exit.Stderr)); stderr != "" {
-				return State{}, fmt.Errorf("volume: running the helper: %w: %s", err, stderr)
-			}
-		}
-		return State{}, fmt.Errorf("volume: running the helper: %w", err)
+		return State{}, helperFailure(err, ctx.Err(), parent.Err(), helperTimeout)
 	}
 	return DecodeResult(string(out))
 }
