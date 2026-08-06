@@ -459,23 +459,34 @@ const (
 // the copy of itself it spawns.
 const HelperFlag = "--audio-helper"
 
-// result is the single line of JSON the helper prints. Audio failures travel in
-// Error rather than in the exit code, so a helper that could not initialise COM
-// stays distinguishable from one that could not be launched at all.
+// result is a successful reading. Neither field carries omitempty: a level of 0
+// is silence, which is a real reading and must survive the round trip.
+//
+// Audio failures travel in the payload rather than in the exit code, so a
+// helper that could not initialise COM stays distinguishable from one that
+// could not be launched at all.
 type result struct {
-	Level int    `json:"level"`
-	Muted bool   `json:"muted"`
-	Error string `json:"error,omitempty"`
+	Level int  `json:"level"`
+	Muted bool `json:"muted"`
 }
 
-// EncodeResult renders the helper's one output line. When opErr is non-nil the
-// state is dropped, so a failure can never be mistaken for a reading.
+// errorResult is a failure. It carries no state at all.
+type errorResult struct {
+	Error string `json:"error"`
+}
+
+// EncodeResult renders the helper's one output line.
+//
+// A failure is encoded as an error-only object rather than an error field
+// beside a zeroed state: the wire format itself guarantees a failed read cannot
+// be mistaken for a successful reading of silence, instead of relying on the
+// decoder checking the fields in the right order.
 func EncodeResult(s State, opErr error) string {
-	r := result{Level: s.Level, Muted: s.Muted}
+	var v any = result{Level: s.Level, Muted: s.Muted}
 	if opErr != nil {
-		r = result{Error: opErr.Error()}
+		v = errorResult{Error: opErr.Error()}
 	}
-	b, err := json.Marshal(r)
+	b, err := json.Marshal(v)
 	if err != nil {
 		// An int, a bool and a string cannot fail to marshal; if that ever
 		// changes, fail in the shape the caller already parses.
@@ -490,7 +501,13 @@ func DecodeResult(line string) (State, error) {
 	if line == "" {
 		return State{}, errors.New("volume: the helper produced no output")
 	}
-	var r result
+	// Both shapes are accepted here so a failure is recognised whichever way it
+	// was encoded; the error is checked first regardless.
+	var r struct {
+		Level int    `json:"level"`
+		Muted bool   `json:"muted"`
+		Error string `json:"error"`
+	}
 	if err := json.Unmarshal([]byte(line), &r); err != nil {
 		return State{}, fmt.Errorf("volume: unreadable helper output %q: %w", line, err)
 	}
