@@ -1141,6 +1141,15 @@ var iidIAudioEndpointVolume = windows.GUID{
 // rightly flags — a uintptr keeps nothing alive and the GC may move what it
 // refers to. Since vet is the only automated check that ever reaches this file,
 // keeping it clean is worth more here than anywhere else in the project.
+// The directive is load-bearing. Callers pass out-parameters as
+// uintptr(unsafe.Pointer(&x)), and the compiler only keeps such a referent
+// alive and unmoved when the conversion appears in the argument list of the
+// syscall itself. Routing them through this wrapper would otherwise leave the
+// pointed-to variables on the stack with nothing but an opaque uintptr
+// referring to them — silent corruption if the stack grows in between, which
+// vet cannot see and no test here can reach.
+//
+//go:uintptrescapes
 func call(obj unsafe.Pointer, slot int, args ...uintptr) error {
 	vtbl := *(**[64]uintptr)(obj)
 	all := append([]uintptr{uintptr(obj)}, args...)
@@ -1163,7 +1172,17 @@ func release(obj unsafe.Pointer) {
 
 // RunHelper executes one audio operation and returns the single line of JSON
 // the service reads from the helper's stdout. args excludes HelperFlag.
-func RunHelper(args []string) string {
+//
+// It recovers from a panic because its contract is to always produce a line:
+// LazyProc.Call panics if a DLL export cannot be resolved, and a helper that
+// dies silently tells the service nothing about why.
+func RunHelper(args []string) (line string) {
+	defer func() {
+		if v := recover(); v != nil {
+			line = EncodeResult(State{}, fmt.Errorf("volume: the helper panicked: %v", v))
+		}
+	}()
+
 	op, want, err := ParseHelperArgs(args)
 	if err != nil {
 		return EncodeResult(State{}, err)
@@ -1252,8 +1271,14 @@ func stepInfo(endpoint unsafe.Pointer) (step, stepCount uint32, err error) {
 	); err != nil {
 		return 0, 0, fmt.Errorf("volume: reading the step info: %w", err)
 	}
-	if stepCount > maxPlausibleSteps {
-		return 0, 0, fmt.Errorf("volume: the device reported %d steps, which is not plausible", stepCount)
+	// Both values are validated, not just the count: the stepping loop is
+	// bounded by the distance from step to the target, so a garbage step
+	// alongside a plausible count is what would actually spin.
+	if stepCount == 0 || stepCount > maxPlausibleSteps {
+		return 0, 0, fmt.Errorf("volume: the device reported %d volume steps, which is not usable", stepCount)
+	}
+	if step >= stepCount {
+		return 0, 0, fmt.Errorf("volume: the device reported step %d of %d, which is out of range", step, stepCount)
 	}
 	return step, stepCount, nil
 }
