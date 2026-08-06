@@ -18,16 +18,43 @@ func TestResultRoundTrip(t *testing.T) {
 }
 
 func TestEncodeResultCarriesTheError(t *testing.T) {
-	line := EncodeResult(State{Level: 45}, errors.New("no default playback device"))
+	line := EncodeResult(State{Level: 45, Muted: true}, errors.New("no default playback device"))
+
 	if !strings.Contains(line, "no default playback device") {
 		t.Fatalf("encoded = %q, want it to carry the error text", line)
+	}
+	// The guarantee is structural: no state key may appear at all, so that
+	// reordering the decoder's checks cannot turn a failure into "silence".
+	if strings.Contains(line, `"level"`) {
+		t.Errorf("encoded = %q, want no level key alongside an error", line)
+	}
+	if strings.Contains(line, `"muted"`) {
+		t.Errorf("encoded = %q, want no muted key alongside an error", line)
 	}
 	if _, err := DecodeResult(line); err == nil {
 		t.Error("DecodeResult() error = nil for an error payload, want an error")
 	}
-	// A failed read must not arrive looking like a successful one.
-	if strings.Contains(line, `"level":45`) {
-		t.Errorf("encoded = %q, want no state reported alongside an error", line)
+}
+
+func TestDecodeResultDiscardsStateThatArrivesWithAnError(t *testing.T) {
+	// A hostile or buggy helper sending both must not yield a usable reading.
+	got, err := DecodeResult(`{"level":90,"muted":false,"error":"boom"}`)
+	if err == nil {
+		t.Fatal("DecodeResult() error = nil, want an error")
+	}
+	if got != (State{}) {
+		t.Errorf("state = %+v, want the zero state when an error is present", got)
+	}
+}
+
+func TestSilenceSurvivesTheRoundTrip(t *testing.T) {
+	// Level 0 is a real reading, not an absent one.
+	got, err := DecodeResult(EncodeResult(State{Level: 0, Muted: false}, nil))
+	if err != nil {
+		t.Fatalf("DecodeResult() error = %v", err)
+	}
+	if got != (State{Level: 0, Muted: false}) {
+		t.Errorf("round trip = %+v, want a level of 0 unmuted", got)
 	}
 }
 
