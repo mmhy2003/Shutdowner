@@ -33,7 +33,7 @@ session. That single fact drives the whole design.
 |---|---|
 | Session bridge | Spawn a helper into the active console session |
 | Helper form | The same binary under a hidden `--audio-helper` subcommand |
-| Audio API | `IAudioEndpointVolume` via raw COM |
+| Audio API | `IAudioEndpointVolume` via raw COM, step-based methods only |
 | Freshness | Read on dashboard load and after each change, not on the status poll |
 | Mute/slider | Moving the slider clears mute; muting preserves the level |
 | Scope | Master volume, default playback device |
@@ -74,14 +74,41 @@ dependency. **No fourth dependency is introduced.**
 ### Why the helper side is expensive
 
 Go has no bindings for `IAudioEndpointVolume`, and the three-dependency rule
-rules out adding one. The helper therefore does raw COM: hand-written GUIDs,
-vtable structs, and `syscall.SyscallN` calls at fixed vtable offsets for
-`GetMasterVolumeLevelScalar`, `SetMasterVolumeLevelScalar`, `GetMute` and
-`SetMute`.
+rules out adding one. The helper therefore does raw COM: hand-written GUIDs and
+`syscall.SyscallN` calls at fixed vtable offsets.
 
-This is the riskiest code in the repository. It cannot be compiled and run
-anywhere except the target machine — only cross-compiled and vetted. A wrong
-vtable index does not fail to build; it calls the wrong method at runtime.
+**The obvious method cannot be used.** `SetMasterVolumeLevelScalar` and
+`GetMasterVolumeLevelScalar` take a `float`, and on Windows amd64 floats travel
+in XMM registers while `syscall.SyscallN` places every argument in an integer
+register. The bit pattern would land in RDX where the callee reads XMM1: the
+call compiles, runs, returns success, and sets a garbage volume. Fixing that
+needs hand-written assembly to make a C call outside the runtime's syscall
+transition, which is more risk than this feature is worth.
+
+The helper therefore uses the step-based methods, whose arguments are all
+integers and pointers:
+
+| Method | Vtable slot | Purpose |
+|---|---|---|
+| `GetVolumeStepInfo` | 16 | current step and total step count |
+| `VolumeStepUp` | 17 | one step louder |
+| `VolumeStepDown` | 18 | one step quieter |
+| `GetMute` | 15 | read the mute flag |
+| `SetMute` | 14 | write the mute flag |
+
+An absolute level is reached by reading the current step and calling
+`VolumeStepUp`/`VolumeStepDown` the difference. Windows typically reports 101
+steps, which maps exactly onto 0–100 percent, but the conversion is
+proportional so any step count works.
+
+This has a second benefit: the step-to-percent arithmetic is ordinary integer
+maths, so it lives in a pure `steps.go` and is **fully tested on Linux** — the
+one part of the audio path that would otherwise have been unverifiable is not.
+
+What remains untestable is the vtable indices and the COM plumbing. It cannot be
+compiled and run anywhere except the target machine — only cross-compiled and
+vetted. A wrong vtable index does not fail to build; it calls the wrong method
+at runtime.
 
 A cheaper variant was considered and rejected: sending `VK_VOLUME_MUTE` /
 `VK_VOLUME_UP` / `VK_VOLUME_DOWN` through `keybd_event` is three lines instead
@@ -95,6 +122,7 @@ read-on-load behaviour, leaving only a mute button.
 internal/volume/
     controller.go      Controller interface, State, sentinel errors
     apply.go           the slider-unmutes rule and clamping — pure
+    steps.go           device step ↔ percent conversion — pure
     protocol.go        the service↔helper JSON line — pure
     fake.go            test double; also backs the --fake-volume dev flag
     unsupported.go     //go:build !windows
@@ -286,6 +314,9 @@ play.
 - **apply**: a level change clears mute; muting preserves the level; unmuting
   restores the same level; clamping at −5, 0, 50, 100 and 105; both fields set
   at once; neither field set.
+- **steps**: step-to-percent and percent-to-step round-trips; the 101-step
+  common case; unusual step counts; a step count of 0 or 1 without dividing by
+  zero; saturation at both ends.
 - **protocol**: encode/decode round-trip; error payload; malformed line; empty
   line; trailing bytes after the JSON; argument formatting and parsing.
 - **web**: GET returns the current state; POST with a level; POST with mute;
