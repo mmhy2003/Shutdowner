@@ -1132,11 +1132,18 @@ var iidIAudioEndpointVolume = windows.GUID{
 	Data4: [8]byte{0x97, 0x22, 0x0C, 0xF7, 0x40, 0x78, 0x22, 0x9A},
 }
 
-// call invokes vtable slot on the COM object at ptr, passing ptr as the
-// implicit `this`. It treats a negative HRESULT as an error.
-func call(ptr uintptr, slot int, args ...uintptr) error {
-	vtbl := *(**[64]uintptr)(unsafe.Pointer(ptr))
-	all := append([]uintptr{ptr}, args...)
+// call invokes vtable slot on the COM object, passing it as the implicit
+// `this`. It treats a negative HRESULT as an error.
+//
+// The object is held as unsafe.Pointer rather than uintptr because that is what
+// it is: a pointer to memory Windows allocated outside the Go heap. Holding it
+// as uintptr would require converting back, which the unsafeptr analyzer
+// rightly flags — a uintptr keeps nothing alive and the GC may move what it
+// refers to. Since vet is the only automated check that ever reaches this file,
+// keeping it clean is worth more here than anywhere else in the project.
+func call(obj unsafe.Pointer, slot int, args ...uintptr) error {
+	vtbl := *(**[64]uintptr)(obj)
+	all := append([]uintptr{uintptr(obj)}, args...)
 	hr, _, _ := syscall.SyscallN(vtbl[slot], all...)
 	if int32(hr) < 0 {
 		return fmt.Errorf("HRESULT 0x%08X", uint32(hr))
@@ -1146,12 +1153,12 @@ func call(ptr uintptr, slot int, args ...uintptr) error {
 
 // release drops a reference. IUnknown::Release is slot 2 and returns a
 // reference count rather than an HRESULT, so it does not go through call.
-func release(ptr uintptr) {
-	if ptr == 0 {
+func release(obj unsafe.Pointer) {
+	if obj == nil {
 		return
 	}
-	vtbl := *(**[64]uintptr)(unsafe.Pointer(ptr))
-	_, _, _ = syscall.SyscallN(vtbl[2], ptr)
+	vtbl := *(**[64]uintptr)(obj)
+	_, _, _ = syscall.SyscallN(vtbl[2], uintptr(obj))
 }
 
 // RunHelper executes one audio operation and returns the single line of JSON
@@ -1202,8 +1209,8 @@ func runOp(op Op, want State) (State, error) {
 
 // defaultEndpointVolume returns an IAudioEndpointVolume for the default
 // playback device. The caller releases it.
-func defaultEndpointVolume() (uintptr, error) {
-	var enumerator uintptr
+func defaultEndpointVolume() (unsafe.Pointer, error) {
+	var enumerator unsafe.Pointer
 	hr, _, _ := procCoCreateInstance.Call(
 		uintptr(unsafe.Pointer(&clsidMMDeviceEnumerator)),
 		0,
@@ -1212,18 +1219,18 @@ func defaultEndpointVolume() (uintptr, error) {
 		uintptr(unsafe.Pointer(&enumerator)),
 	)
 	if int32(hr) < 0 {
-		return 0, fmt.Errorf("volume: creating the device enumerator: HRESULT 0x%08X", uint32(hr))
+		return nil, fmt.Errorf("volume: creating the device enumerator: HRESULT 0x%08X", uint32(hr))
 	}
 	defer release(enumerator)
 
-	var device uintptr
+	var device unsafe.Pointer
 	// IMMDeviceEnumerator::GetDefaultAudioEndpoint, slot 4.
 	if err := call(enumerator, 4, eRender, eMultimedia, uintptr(unsafe.Pointer(&device))); err != nil {
-		return 0, fmt.Errorf("volume: no default playback device: %w", err)
+		return nil, fmt.Errorf("volume: no default playback device: %w", err)
 	}
 	defer release(device)
 
-	var endpoint uintptr
+	var endpoint unsafe.Pointer
 	// IMMDevice::Activate, slot 3.
 	if err := call(device, 3,
 		uintptr(unsafe.Pointer(&iidIAudioEndpointVolume)),
@@ -1231,13 +1238,13 @@ func defaultEndpointVolume() (uintptr, error) {
 		0,
 		uintptr(unsafe.Pointer(&endpoint)),
 	); err != nil {
-		return 0, fmt.Errorf("volume: activating the volume interface: %w", err)
+		return nil, fmt.Errorf("volume: activating the volume interface: %w", err)
 	}
 	return endpoint, nil
 }
 
 // stepInfo reads the device's current step and how many steps it has.
-func stepInfo(endpoint uintptr) (step, stepCount uint32, err error) {
+func stepInfo(endpoint unsafe.Pointer) (step, stepCount uint32, err error) {
 	// IAudioEndpointVolume::GetVolumeStepInfo, slot 16.
 	if err := call(endpoint, 16,
 		uintptr(unsafe.Pointer(&step)),
@@ -1251,7 +1258,7 @@ func stepInfo(endpoint uintptr) (step, stepCount uint32, err error) {
 	return step, stepCount, nil
 }
 
-func readState(endpoint uintptr) (State, error) {
+func readState(endpoint unsafe.Pointer) (State, error) {
 	step, stepCount, err := stepInfo(endpoint)
 	if err != nil {
 		return State{}, err
@@ -1264,7 +1271,7 @@ func readState(endpoint uintptr) (State, error) {
 	return State{Level: LevelFromStep(step, stepCount), Muted: muted != 0}, nil
 }
 
-func writeState(endpoint uintptr, want State) error {
+func writeState(endpoint unsafe.Pointer, want State) error {
 	step, stepCount, err := stepInfo(endpoint)
 	if err != nil {
 		return err
