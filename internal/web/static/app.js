@@ -18,7 +18,8 @@
     pending: null,     // { id, action, firesAtMs }
     firedAction: null, // the action whose countdown reached zero
     failedPolls: 0,
-    localTime: null
+    localTime: null,
+    volume: null
   };
 
   async function post(path, payload) {
@@ -137,6 +138,14 @@
       if (b.dataset.action === "sleep") b.disabled = !data.capabilities.sleep;
       if (b.dataset.action === "hibernate") b.disabled = !data.capabilities.hibernate;
     });
+
+    // The status poll only says whether anyone is signed in; the level itself
+    // is never polled. Coming back from unavailable is the moment to re-read it.
+    if (data.audioAvailable && slider.disabled) {
+      loadVolume();
+    } else if (!data.audioAvailable && !slider.disabled) {
+      setVolumeEnabled(false);
+    }
 
     // A successful poll proves the PC is reachable, so any locally recorded
     // "this action fired" marker is stale — the countdown may have elapsed
@@ -379,6 +388,91 @@
       showError(e.message);
     }
   });
+
+  // ---- volume -------------------------------------------------------------
+
+  var volumeRow = el("volume-row");
+  var muteButton = el("volume-mute");
+  var slider = el("volume-slider");
+  var readout = el("volume-readout");
+
+  function renderVolume() {
+    if (!state.volume) {
+      slider.value = 0;
+      readout.textContent = "—";
+      muteButton.textContent = "🔊";
+      muteButton.setAttribute("aria-pressed", "false");
+      return;
+    }
+    slider.value = state.volume.level;
+    readout.textContent = state.volume.level + "%";
+    muteButton.textContent = state.volume.muted ? "🔇" : "🔊";
+    muteButton.setAttribute("aria-pressed", state.volume.muted ? "true" : "false");
+    muteButton.setAttribute("aria-label", state.volume.muted ? "Unmute" : "Mute");
+  }
+
+  function setVolumeEnabled(enabled) {
+    slider.disabled = !enabled;
+    muteButton.disabled = !enabled;
+    volumeRow.classList.toggle("disabled", !enabled);
+    var reason = enabled ? "" : "Nobody is signed in at the PC";
+    slider.title = reason;
+    muteButton.title = reason;
+    if (!enabled) {
+      state.volume = null;
+      renderVolume();
+    }
+  }
+
+  async function loadVolume() {
+    try {
+      var res = await fetch("/api/volume", { headers: { Accept: "application/json" } });
+      if (res.status === 401) {
+        window.location.href = "/login";
+        return;
+      }
+      if (!res.ok) {
+        // 503 means nobody is signed in; anything else is a real failure. In
+        // both cases the honest thing is to stop claiming a level.
+        setVolumeEnabled(false);
+        return;
+      }
+      state.volume = await res.json();
+      setVolumeEnabled(true);
+      renderVolume();
+    } catch (e) {
+      setVolumeEnabled(false);
+    }
+  }
+
+  async function sendVolume(payload) {
+    try {
+      showError("");
+      state.volume = await post("/api/volume", payload);
+      setVolumeEnabled(true);
+      renderVolume();
+    } catch (e) {
+      showError(e.message);
+      // Put the controls back where the server last said they were, rather
+      // than leaving the slider showing a change that did not take.
+      renderVolume();
+    }
+  }
+
+  // Live feedback while dragging, but only one request when the drag ends.
+  slider.addEventListener("input", function () {
+    readout.textContent = slider.value + "%";
+  });
+  slider.addEventListener("change", function () {
+    sendVolume({ level: parseInt(slider.value, 10) });
+  });
+
+  muteButton.addEventListener("click", function () {
+    var muted = state.volume ? !state.volume.muted : true;
+    sendVolume({ muted: muted });
+  });
+
+  loadVolume();
 
   setInterval(render, 250);
   setInterval(poll, 3000);

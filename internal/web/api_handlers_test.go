@@ -376,3 +376,20 @@ func TestDismissRequiresCSRF(t *testing.T) {
 		t.Errorf("status = %d, want 403 without a CSRF token", res.Code)
 	}
 }
+
+func TestDashboardRendersTheVolumeRow(t *testing.T) {
+	e := newTestEnv(t)
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.AddCookie(e.sessionCookie(t))
+	body := do(t, e.handler, r).Body.String()
+
+	for _, want := range []string{`id="volume-row"`, `id="volume-mute"`, `id="volume-slider"`, `id="volume-readout"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the dashboard does not contain %s", want)
+		}
+	}
+	// The slider must be bounded in the markup, not only in JavaScript.
+	if !strings.Contains(body, `min="0"`) || !strings.Contains(body, `max="100"`) {
+		t.Error("the slider is not bounded to 0-100 in the markup")
+	}
+}
