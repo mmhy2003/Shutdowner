@@ -154,10 +154,16 @@ func TestServiceArgsIncludeAllowPublicBindOnlyWhenSet(t *testing.T) {
 	}
 }
 
-func TestAudioHelperFlagIsDetectedBeforeFlagParsing(t *testing.T) {
+func TestIsAudioHelperRecognisesTheFlag(t *testing.T) {
 	// The helper flag is an internal calling convention, not a registered
 	// flag, so flag.Parse would reject it. It must be recognised from the raw
 	// argument list first.
+	//
+	// This test covers the recognition only. That the dispatch in main happens
+	// BEFORE flag.Parse is the load-bearing half — move it after and every
+	// volume operation dies with "flag provided but not defined:
+	// -audio-helper" — and nothing here would notice, because main is never
+	// invoked. That ordering is enforced by reading main, not by this test.
 	if !isAudioHelper([]string{"shutdowner.exe", volume.HelperFlag, "get"}) {
 		t.Error("isAudioHelper() = false for a helper invocation")
 	}

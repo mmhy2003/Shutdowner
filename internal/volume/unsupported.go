@@ -13,6 +13,6 @@ func New() Controller { return systemController{} }
 
 func (systemController) Get(context.Context) (State, error) { return State{}, ErrUnsupported }
 
-func (systemController) Set(context.Context, State) error { return ErrUnsupported }
+func (systemController) Set(context.Context, State) (State, error) { return State{}, ErrUnsupported }
 
 func (systemController) Available() bool { return false }

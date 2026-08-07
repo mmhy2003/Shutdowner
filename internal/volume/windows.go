@@ -41,9 +41,11 @@ func (c systemController) Get(ctx context.Context) (State, error) {
 	return c.run(ctx, OpGet, State{})
 }
 
-func (c systemController) Set(ctx context.Context, s State) error {
-	_, err := c.run(ctx, OpSet, s)
-	return err
+// Set applies the state and returns what the device settled on. The helper
+// re-reads after writing, so this is the device's own answer rather than an
+// echo of the request: a device with coarse steps cannot hit every percentage.
+func (c systemController) Set(ctx context.Context, s State) (State, error) {
+	return c.run(ctx, OpSet, s)
 }
 
 // run spawns the helper inside the logged-in user's session and reads its one
@@ -67,10 +69,12 @@ func (systemController) run(ctx context.Context, op Op, want State) (State, erro
 
 	var token windows.Token
 	if err := windows.WTSQueryUserToken(session, &token); err != nil {
-		// Nobody is signed in, or the console is sitting at the lock screen.
-		// Either way there is no user to borrow, and it is not an error worth
-		// logging a stack over.
-		return State{}, ErrNoSession
+		// Nobody is signed in, the console is at the lock screen, or this
+		// process lacks SeTcbPrivilege — which is what happens when the binary
+		// is run under --console as an ordinary administrator rather than as
+		// the service. Wrapped so errors.Is still matches while the underlying
+		// reason survives into the log.
+		return State{}, fmt.Errorf("%w: %v", ErrNoSession, err)
 	}
 	defer token.Close()
 

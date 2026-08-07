@@ -23,8 +23,12 @@ func TestFakeStartsAvailableAtHalfVolume(t *testing.T) {
 func TestFakeSetRecordsAndPersists(t *testing.T) {
 	f := NewFake()
 	want := State{Level: 20, Muted: true}
-	if err := f.Set(context.Background(), want); err != nil {
+	settled, err := f.Set(context.Background(), want)
+	if err != nil {
 		t.Fatalf("Set() error = %v", err)
+	}
+	if settled != want {
+		t.Errorf("Set() = %+v, want it to report the stored state %+v", settled, want)
 	}
 
 	got, _ := f.Get(context.Background())
@@ -48,7 +52,7 @@ func TestFakeReportsConfiguredErrors(t *testing.T) {
 
 	g := NewFake()
 	g.SetSetError(boom)
-	if err := g.Set(context.Background(), State{Level: 10}); !errors.Is(err, boom) {
+	if _, err := g.Set(context.Background(), State{Level: 10}); !errors.Is(err, boom) {
 		t.Errorf("Set() error = %v, want boom", err)
 	}
 	// A failed Set must not have changed the stored state.
@@ -67,7 +71,7 @@ func TestFakeAvailabilityIsConfigurable(t *testing.T) {
 
 func TestFakeCallsReturnsACopy(t *testing.T) {
 	f := NewFake()
-	_ = f.Set(context.Background(), State{Level: 10})
+	_, _ = f.Set(context.Background(), State{Level: 10})
 	calls := f.Calls()
 	calls[0].State.Level = 999
 	if again := f.Calls(); again[0].State.Level != 10 {

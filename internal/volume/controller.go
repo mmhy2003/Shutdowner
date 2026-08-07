@@ -31,7 +31,11 @@ var (
 
 type Controller interface {
 	Get(ctx context.Context) (State, error)
-	Set(ctx context.Context, s State) error
+
+	// Set applies the state and returns what the device actually settled on. A
+	// device with coarse steps cannot hit every percentage, and the caller needs
+	// the truth rather than an echo of the request.
+	Set(ctx context.Context, s State) (State, error)
 
 	// Available reports whether a session is attached to the console. It must
 	// stay cheap enough for the 3-second status poll, so it queries the session

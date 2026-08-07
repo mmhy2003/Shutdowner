@@ -44,20 +44,27 @@ func (s *Server) handleVolumeSet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	want := volume.Apply(current, req.Level, req.Muted)
-	if err := s.volume.Set(r.Context(), want); err != nil {
+	// The response is what the device settled on, not what was asked for: a
+	// device with coarse steps rounds a request to the nearest one it has, and
+	// the status poll never re-reads the level, so an echo of the request would
+	// leave the dashboard showing a number the PC is not at until a reload.
+	got, err := s.volume.Set(r.Context(), want)
+	if err != nil {
 		s.writeVolumeError(w, err, "setting the volume")
 		return
 	}
 
 	s.logger.Info("volume changed", "level", want.Level, "muted", want.Muted, "ip", ClientIP(r))
-	writeJSON(w, http.StatusOK, want)
+	writeJSON(w, http.StatusOK, got)
 }
 
 // writeVolumeError maps a controller failure onto a status code.
 //
 // Nobody being signed in is a temporary, expected condition rather than a
-// fault, so it is 503, it is not logged as an error, and its message is safe to
-// show — it tells the user exactly what to do about it.
+// fault, so it is 503, it is logged at Info rather than Error, and its message
+// is safe to show — it tells the user exactly what to do about it. It is logged
+// at all because the Windows controller wraps the OS error behind ErrNoSession,
+// and that detail separates an idle PC from a process missing SeTcbPrivilege.
 //
 // Anything else is unclassified, and its detail stays in the log rather than
 // the response: a helper that fails to start wraps an *exec.Error whose text
@@ -66,6 +73,10 @@ func (s *Server) handleVolumeSet(w http.ResponseWriter, r *http.Request) {
 // safe.
 func (s *Server) writeVolumeError(w http.ResponseWriter, err error, doing string) {
 	if errors.Is(err, volume.ErrNoSession) || errors.Is(err, volume.ErrUnsupported) {
+		// Not an error condition — an idle PC is expected — but the underlying
+		// reason is worth having when someone is trying to work out why the
+		// controls are greyed out.
+		s.logger.Info(doing, "unavailable", err)
 		writeJSONError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}

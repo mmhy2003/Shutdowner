@@ -1,8 +1,10 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -86,6 +88,38 @@ func TestVolumeSetAppliesALevel(t *testing.T) {
 	calls := e.volume.Calls()
 	if len(calls) != 1 || calls[0].State != (volume.State{Level: 60}) {
 		t.Errorf("Calls() = %+v, want one call setting level 60 unmuted", calls)
+	}
+}
+
+// snappingController models a device with coarse steps: it rounds every
+// requested level to the nearest 25. The Fake cannot stand in here, because a
+// fake that stores exactly what it is given can never show the difference
+// between what was asked for and what happened.
+type snappingController struct{ state volume.State }
+
+func (c *snappingController) Get(context.Context) (volume.State, error) { return c.state, nil }
+
+func (c *snappingController) Set(_ context.Context, s volume.State) (volume.State, error) {
+	c.state = volume.State{Level: ((s.Level + 12) / 25) * 25, Muted: s.Muted}
+	return c.state, nil
+}
+
+func (c *snappingController) Available() bool { return true }
+
+func TestVolumeSetReturnsWhatTheDeviceSettledOn(t *testing.T) {
+	e := newTestEnv(t)
+	e.srv.volume = &snappingController{}
+
+	res := postJSON(t, e, "/api/volume", `{"level":45}`)
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %q)", res.Code, res.Body.String())
+	}
+	var got volume.State
+	if err := json.Unmarshal(res.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decoding: %v", err)
+	}
+	if got.Level != 50 {
+		t.Errorf("level = %d, want 50 — the response must report what the device did, not what was asked", got.Level)
 	}
 }
 
@@ -214,5 +248,21 @@ func TestVolumeUnavailableStillExplainsItself(t *testing.T) {
 	// regression in the other direction.
 	if !strings.Contains(res.Body.String(), "signed in") {
 		t.Errorf("response body = %q, want it to say nobody is signed in", res.Body.String())
+	}
+}
+
+func TestVolumeUnavailableSurvivesWrapping(t *testing.T) {
+	e := newTestEnv(t)
+	// The shape the Windows controller now produces: ErrNoSession wrapped
+	// around the OS error, so a missing SeTcbPrivilege is distinguishable from
+	// an idle PC instead of both collapsing to one bare sentinel.
+	e.volume.SetGetError(fmt.Errorf("%w: %v", volume.ErrNoSession, errors.New("Access is denied.")))
+
+	res, _ := getVolume(t, e)
+	if res.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 — wrapping must not turn an idle PC into a 500", res.Code)
+	}
+	if !strings.Contains(res.Body.String(), "signed in") {
+		t.Errorf("response body = %q, want the sentinel's own wording to survive", res.Body.String())
 	}
 }

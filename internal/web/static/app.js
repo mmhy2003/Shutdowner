@@ -141,10 +141,18 @@
 
     // The status poll only says whether anyone is signed in; the level itself
     // is never polled. Coming back from unavailable is the moment to re-read it.
-    if (data.audioAvailable && slider.disabled) {
-      loadVolume();
-    } else if (!data.audioAvailable && !slider.disabled) {
-      setVolumeEnabled(false);
+    if (data.audioAvailable) {
+      // Stop re-reading once the ceiling is hit. Every attempt spawns a helper
+      // process on the PC and writes a log line, and a device that has failed
+      // this many times running — no default endpoint, a bad HRESULT — is not
+      // going to start working on the next poll three seconds from now.
+      if (slider.disabled && volumeFailures < maxVolumeFailures) loadVolume();
+    } else {
+      // Nobody signed in is a different situation, not a repeat of the same
+      // failure, so clear the count: signing back in gets a fresh set of
+      // attempts and the feature recovers on its own.
+      volumeFailures = 0;
+      if (!slider.disabled) setVolumeEnabled(false, "Nobody is signed in at the PC");
     }
 
     // A successful poll proves the PC is reachable, so any locally recorded
@@ -412,13 +420,24 @@
     muteButton.setAttribute("aria-label", state.volume.muted ? "Unmute" : "Mute");
   }
 
-  function setVolumeEnabled(enabled) {
+  // One load at a time, and not forever. The status poll re-triggers loadVolume
+  // whenever the controls are disabled, and every call is a process spawn on
+  // the PC, so an in-flight call must not be doubled and a persistent failure
+  // must not become an unbounded retry loop.
+  var volumeLoading = false;
+  var volumeFailures = 0;
+  var maxVolumeFailures = 3;
+
+  // reason is the server's own explanation, which differs by case: nobody
+  // signed in, a COM failure, an unsupported platform. Asserting one of those
+  // for all of them tells the operator something that may simply be untrue.
+  function setVolumeEnabled(enabled, reason) {
     slider.disabled = !enabled;
     muteButton.disabled = !enabled;
     volumeRow.classList.toggle("disabled", !enabled);
-    var reason = enabled ? "" : "Nobody is signed in at the PC";
-    slider.title = reason;
-    muteButton.title = reason;
+    var title = enabled ? "" : (reason || "Volume is unavailable");
+    slider.title = title;
+    muteButton.title = title;
     if (!enabled) {
       state.volume = null;
       renderVolume();
@@ -426,6 +445,10 @@
   }
 
   async function loadVolume() {
+    // One at a time: the status poll re-triggers this whenever the controls are
+    // disabled, and each call is a process spawn on the PC.
+    if (volumeLoading) return;
+    volumeLoading = true;
     try {
       var res = await fetch("/api/volume", { headers: { Accept: "application/json" } });
       if (res.status === 401) {
@@ -433,16 +456,31 @@
         return;
       }
       if (!res.ok) {
-        // 503 means nobody is signed in; anything else is a real failure. In
-        // both cases the honest thing is to stop claiming a level.
-        setVolumeEnabled(false);
+        // 503 means nobody is signed in or the platform has no audio support;
+        // anything else is a real failure. In every case the honest thing is to
+        // stop claiming a level and to repeat the server's own reason rather
+        // than inventing one.
+        var reason = "";
+        try {
+          var body = await res.json();
+          reason = body.error || "";
+        } catch (e) { /* no body, or not JSON */ }
+        volumeFailures += 1;
+        setVolumeEnabled(false, reason);
         return;
       }
       state.volume = await res.json();
+      // A load that worked clears the count, so a device that recovers gets its
+      // retries back.
+      volumeFailures = 0;
       setVolumeEnabled(true);
       renderVolume();
     } catch (e) {
-      setVolumeEnabled(false);
+      // The fetch itself failed, so there is no server message to quote.
+      volumeFailures += 1;
+      setVolumeEnabled(false, "");
+    } finally {
+      volumeLoading = false;
     }
   }
 
@@ -450,6 +488,9 @@
     try {
       showError("");
       state.volume = await post("/api/volume", payload);
+      // A change that took is stronger evidence than a read that worked, so it
+      // clears the failure count too.
+      volumeFailures = 0;
       setVolumeEnabled(true);
       renderVolume();
     } catch (e) {

@@ -14,7 +14,7 @@ func TestNewOffWindowsRefusesEverything(t *testing.T) {
 	if _, err := c.Get(context.Background()); !errors.Is(err, ErrUnsupported) {
 		t.Errorf("Get() error = %v, want ErrUnsupported", err)
 	}
-	if err := c.Set(context.Background(), State{Level: 50}); !errors.Is(err, ErrUnsupported) {
+	if _, err := c.Set(context.Background(), State{Level: 50}); !errors.Is(err, ErrUnsupported) {
 		t.Errorf("Set() error = %v, want ErrUnsupported", err)
 	}
 	if c.Available() {

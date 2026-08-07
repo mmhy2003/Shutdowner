@@ -64,15 +64,18 @@ func (f *Fake) Get(context.Context) (State, error) {
 	return f.state, nil
 }
 
-func (f *Fake) Set(_ context.Context, s State) error {
+// Set stores the state and returns it. A real device may settle on a nearby
+// step instead, but a fake that invented a different answer would be lying
+// about a machine it does not have.
+func (f *Fake) Set(_ context.Context, s State) (State, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, Call{State: s})
 	if f.setErr != nil {
-		return f.setErr
+		return State{}, f.setErr
 	}
 	f.state = s
-	return nil
+	return f.state, nil
 }
 
 func (f *Fake) Available() bool {
