@@ -20,6 +20,7 @@ import (
 	"shutdowner/internal/config"
 	"shutdowner/internal/logging"
 	"shutdowner/internal/power"
+	"shutdowner/internal/volume"
 	"shutdowner/internal/web"
 	"shutdowner/internal/winsvc"
 )
@@ -28,6 +29,7 @@ var (
 	flagConfig          = flag.String("config", "", "path to .env (default: beside the executable)")
 	flagConsole         = flag.Bool("console", false, "log to stdout instead of the log file")
 	flagFakePower       = flag.Bool("fake-power", false, "development: log actions instead of executing them")
+	flagFakeVolume      = flag.Bool("fake-volume", false, "development: keep the volume in memory instead of touching the audio device")
 	flagAllowPublicBind = flag.Bool("allow-public-bind", false, "permit a non-loopback listen address")
 	flagInit            = flag.Bool("init", false, "write a starter .env and exit; refuses to overwrite")
 	flagHashPassword    = flag.Bool("hash-password", false, "prompt for a password, print its hash, and exit")
@@ -59,7 +61,29 @@ SHUTDOWNER_SESSION_TTL=168h
 SHUTDOWNER_LOG_FILE=
 `
 
+// isAudioHelper reports whether this process was spawned as the audio helper.
+// The flag is an internal calling convention between the service and the copy
+// of itself it launches into the user's session, not part of the public CLI.
+func isAudioHelper(argv []string) bool {
+	return len(argv) > 1 && argv[1] == volume.HelperFlag
+}
+
+// audioHelperArgs returns the operation arguments following the helper flag.
+func audioHelperArgs(argv []string) []string {
+	if !isAudioHelper(argv) {
+		return nil
+	}
+	return argv[2:]
+}
+
 func main() {
+	// The helper runs before anything else: it loads no config, opens no log
+	// file and binds no socket. It prints one line and exits.
+	if isAudioHelper(os.Args) {
+		fmt.Println(volume.RunHelper(audioHelperArgs(os.Args)))
+		return
+	}
+
 	flag.Parse()
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "shutdowner:", err)
@@ -246,6 +270,12 @@ func runServer() error {
 		ctrl = power.NewFake()
 	}
 
+	var vol volume.Controller = volume.New()
+	if *flagFakeVolume {
+		logger.Warn("running with --fake-volume: the audio device will not be touched")
+		vol = volume.NewFake()
+	}
+
 	statePath, err := schedulePath(*flagConfig)
 	if err != nil {
 		return err
@@ -268,6 +298,7 @@ func runServer() error {
 		Limiter:      auth.NewLimiter(auth.DefaultPerIPLimit, auth.DefaultGlobalLimit, auth.DefaultWindow),
 		Actions:      actions,
 		Power:        ctrl,
+		Volume:       vol,
 		Logger:       logger,
 		PasswordHash: cfg.PasswordHash,
 		DelaySeconds: int(cfg.Delay / time.Second),

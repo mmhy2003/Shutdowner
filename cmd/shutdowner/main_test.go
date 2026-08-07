@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/joho/godotenv"
 
 	"shutdowner/internal/config"
+	"shutdowner/internal/volume"
 )
 
 var secretPattern = regexp.MustCompile(`SHUTDOWNER_SESSION_SECRET='([0-9a-f]{64})'`)
@@ -149,6 +151,29 @@ func TestServiceArgsIncludeAllowPublicBindOnlyWhenSet(t *testing.T) {
 	}
 	if !slices.Contains(args, "--allow-public-bind") {
 		t.Errorf("args = %v, want --allow-public-bind forwarded when the flag is set", args)
+	}
+}
+
+func TestAudioHelperFlagIsDetectedBeforeFlagParsing(t *testing.T) {
+	// The helper flag is an internal calling convention, not a registered
+	// flag, so flag.Parse would reject it. It must be recognised from the raw
+	// argument list first.
+	if !isAudioHelper([]string{"shutdowner.exe", volume.HelperFlag, "get"}) {
+		t.Error("isAudioHelper() = false for a helper invocation")
+	}
+	if isAudioHelper([]string{"shutdowner.exe", "--console"}) {
+		t.Error("isAudioHelper() = true for an ordinary invocation")
+	}
+	if isAudioHelper([]string{"shutdowner.exe"}) {
+		t.Error("isAudioHelper() = true for no arguments at all")
+	}
+}
+
+func TestAudioHelperArgsAreEverythingAfterTheFlag(t *testing.T) {
+	got := audioHelperArgs([]string{"shutdowner.exe", volume.HelperFlag, "set", "45", "false"})
+	want := []string{"set", "45", "false"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("audioHelperArgs() = %v, want %v", got, want)
 	}
 }
 
