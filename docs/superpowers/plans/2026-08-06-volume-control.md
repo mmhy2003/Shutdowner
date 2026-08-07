@@ -31,7 +31,7 @@
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `volume.State{Level int, Muted bool}` with JSON tags `level`/`muted`; `volume.Controller` with `Get(context.Context) (State, error)`, `Set(context.Context, State) error`, `Available() bool`; `volume.ErrNoSession`, `volume.ErrUnsupported`; `volume.Apply(current State, level *int, muted *bool) State`; `volume.Clamp(int) int`; `volume.MinLevel`/`MaxLevel`; `volume.LevelFromStep(step, stepCount uint32) int`; `volume.StepFromLevel(level int, stepCount uint32) uint32`; `volume.Op` with `OpGet`/`OpSet`; `volume.HelperFlag`; `volume.EncodeResult(State, error) string`; `volume.DecodeResult(string) (State, error)`; `volume.FormatHelperArgs(Op, State) []string`; `volume.ParseHelperArgs([]string) (Op, State, error)`.
+- Produces: `volume.State{Level int, Muted bool}` with JSON tags `level`/`muted`; `volume.Controller` with `Get(context.Context) (State, error)`, `Set(context.Context, State) (State, error)`, `Available() bool`; `volume.ErrNoSession`, `volume.ErrUnsupported`; `volume.Apply(current State, level *int, muted *bool) State`; `volume.Clamp(int) int`; `volume.MinLevel`/`MaxLevel`; `volume.LevelFromStep(step, stepCount uint32) int`; `volume.StepFromLevel(level int, stepCount uint32) uint32`; `volume.Op` with `OpGet`/`OpSet`; `volume.HelperFlag`; `volume.EncodeResult(State, error) string`; `volume.DecodeResult(string) (State, error)`; `volume.FormatHelperArgs(Op, State) []string`; `volume.ParseHelperArgs([]string) (Op, State, error)`.
 
 This task is the entire testable core. Everything in it is pure Go with no platform dependency, which is deliberate: the two Windows files added later contain no branch worth reasoning about because all the reasoning lives here.
 
@@ -339,7 +339,12 @@ var (
 
 type Controller interface {
 	Get(ctx context.Context) (State, error)
-	Set(ctx context.Context, s State) error
+
+	// Set applies the state and returns what the device actually settled on.
+	// Returning only an error would strand the helper's read-back inside the
+	// Windows layer, and the dashboard would report the requested level rather
+	// than the achieved one on any device with coarse steps.
+	Set(ctx context.Context, s State) (State, error)
 
 	// Available reports whether a session is attached to the console. It must
 	// stay cheap enough for the 3-second status poll, so it queries the session
@@ -949,9 +954,8 @@ func (c systemController) Get(ctx context.Context) (State, error) {
 	return c.run(ctx, OpGet, State{})
 }
 
-func (c systemController) Set(ctx context.Context, s State) error {
-	_, err := c.run(ctx, OpSet, s)
-	return err
+func (c systemController) Set(ctx context.Context, s State) (State, error) {
+	return c.run(ctx, OpSet, s)
 }
 
 // run spawns the helper inside the logged-in user's session and reads its one

@@ -146,7 +146,12 @@ type State struct {
 
 type Controller interface {
     Get(ctx context.Context) (State, error)
-    Set(ctx context.Context, s State) error
+    // Set applies the state and returns what the device actually settled on. A
+    // device with coarse steps cannot hit every percentage, and the caller
+    // needs the truth rather than an echo of its own request — the helper
+    // deliberately re-reads after writing, and that reading has to survive all
+    // the way to the browser or the dashboard lies until the next reload.
+    Set(ctx context.Context, s State) (State, error)
     // Available reports whether a console session is attached. It is
     // deliberately outside Get/Set because it must be cheap enough for the
     // 3-second status poll: it queries the session manager and never spawns a
