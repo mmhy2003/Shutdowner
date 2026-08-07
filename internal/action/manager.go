@@ -429,7 +429,12 @@ func (m *Manager) Status() Status {
 }
 
 func (m *Manager) pendingLocked(now time.Time) Pending {
-	remaining := int(m.firesAt.Sub(now) / time.Second)
+	// Rounded up, not truncated. The deadline is computed by the caller before
+	// Schedule takes the lock, so by the time this reads the clock a fraction
+	// of a second has always elapsed — truncating would report 44 the instant a
+	// 45 second countdown was scheduled. Rounding up also gives the right
+	// countdown semantics: N is displayed while the remainder is in (N-1, N].
+	remaining := int((m.firesAt.Sub(now) + time.Second - 1) / time.Second)
 	if remaining < 0 {
 		remaining = 0
 	}

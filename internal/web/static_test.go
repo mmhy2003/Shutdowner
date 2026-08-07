@@ -192,3 +192,22 @@ func TestMissingStaticAssetIs404(t *testing.T) {
 		t.Errorf("status = %d, want 404", res.Code)
 	}
 }
+
+func TestClientScriptDrivesTheVolumeControls(t *testing.T) {
+	e := newTestEnv(t)
+	res := do(t, e.handler, httptest.NewRequest(http.MethodGet, "/static/app.js", nil))
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", res.Code)
+	}
+	js := res.Body.String()
+
+	for _, want := range []string{"/api/volume", "volume-slider", "volume-mute", "audioAvailable"} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js does not reference %q", want)
+		}
+	}
+	// Sending on every input event would fire a request per pixel of drag.
+	if !strings.Contains(js, `"change"`) {
+		t.Error("app.js does not listen for the slider's change event")
+	}
+}

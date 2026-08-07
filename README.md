@@ -76,7 +76,14 @@ shutdowner.exe --console            run in the foreground, log to stdout
 shutdowner.exe --config PATH        alternate .env location
 shutdowner.exe --allow-public-bind  permit a non-loopback listen address
 shutdowner.exe --fake-power         development only: log actions, do not execute
+shutdowner.exe --fake-volume        development only: keep the volume in memory, do not touch the audio device
+shutdowner.exe --audio-helper ...   internal: not for direct use; see below
 ```
+
+`--audio-helper` is the calling convention the service uses to spawn a copy of
+itself into the signed-in user's session, not a flag to run by hand. It is
+recognised before `flag.Parse`, so it is not a registered flag and does not
+appear in `--help`; it prints one line of JSON and exits.
 
 `--install-service` passes `--config` and `--allow-public-bind` through to the
 installed service's command line, with `--config` made absolute. Any other flag
@@ -116,6 +123,14 @@ make run-dev
   common after `powercfg /h off`.
 - After a shutdown fires, the page shows "PC is offline" rather than a
   connection error. Being unreachable is the confirmation.
+
+### Volume
+
+The dashboard's mute button and slider control the master volume of the
+default playback device. Because Windows audio endpoints are per-session and
+the service runs in session 0, the service spawns a copy of itself into the
+signed-in user's session to do the work. When nobody is signed in the controls
+disable themselves, and re-enable on the next poll once someone signs in.
 
 ### Scheduling
 
@@ -175,3 +190,23 @@ wrapper, which cannot run off Windows. After installing, walk this list:
 7. With an unsaved Notepad open: a forced shutdown completes; a graceful one is
    blocked by Windows and the PC is still up afterwards.
 8. `shutdowner.log` is written, and rotates once it passes 5 MB.
+9. The volume helper launches at all: `CreateProcessAsUser` succeeds with the
+   NULL `lpDesktop` that Go's `exec` passes. If it fails with access-denied, the
+   fallback is a raw `CreateProcessAsUser` specifying `winsta0\default`.
+10. The dashboard shows the PC's real volume when it loads.
+11. The slider sets an absolute level; check the number against the Windows
+    volume mixer.
+12. Mute silences; unmute returns to exactly the previous level.
+13. Dragging the slider while muted unmutes.
+14. No console window flashes on the PC's screen when the slider moves.
+15. With the screen locked but a user still signed in, the controls still work.
+16. After signing out entirely the controls disable with a reason, and re-enable
+    on the next poll after signing back in.
+17. After a fast-user-switch, changes affect the newly active session.
+18. Dragging the slider end to end completes promptly — the helper walks one
+    device step at a time, so a device reporting an unusual number of steps
+    would show up here as a slow response.
+
+Items 15, 16 and 17 — the lock screen, signing out and fast user switching — are
+the likeliest to reveal problems; fast user switching is the least certain of
+the three.

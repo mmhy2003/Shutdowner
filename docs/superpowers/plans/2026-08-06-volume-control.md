@@ -31,7 +31,7 @@
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `volume.State{Level int, Muted bool}` with JSON tags `level`/`muted`; `volume.Controller` with `Get(context.Context) (State, error)`, `Set(context.Context, State) error`, `Available() bool`; `volume.ErrNoSession`, `volume.ErrUnsupported`; `volume.Apply(current State, level *int, muted *bool) State`; `volume.Clamp(int) int`; `volume.MinLevel`/`MaxLevel`; `volume.LevelFromStep(step, stepCount uint32) int`; `volume.StepFromLevel(level int, stepCount uint32) uint32`; `volume.Op` with `OpGet`/`OpSet`; `volume.HelperFlag`; `volume.EncodeResult(State, error) string`; `volume.DecodeResult(string) (State, error)`; `volume.FormatHelperArgs(Op, State) []string`; `volume.ParseHelperArgs([]string) (Op, State, error)`.
+- Produces: `volume.State{Level int, Muted bool}` with JSON tags `level`/`muted`; `volume.Controller` with `Get(context.Context) (State, error)`, `Set(context.Context, State) (State, error)`, `Available() bool`; `volume.ErrNoSession`, `volume.ErrUnsupported`; `volume.Apply(current State, level *int, muted *bool) State`; `volume.Clamp(int) int`; `volume.MinLevel`/`MaxLevel`; `volume.LevelFromStep(step, stepCount uint32) int`; `volume.StepFromLevel(level int, stepCount uint32) uint32`; `volume.Op` with `OpGet`/`OpSet`; `volume.HelperFlag`; `volume.EncodeResult(State, error) string`; `volume.DecodeResult(string) (State, error)`; `volume.FormatHelperArgs(Op, State) []string`; `volume.ParseHelperArgs([]string) (Op, State, error)`.
 
 This task is the entire testable core. Everything in it is pure Go with no platform dependency, which is deliberate: the two Windows files added later contain no branch worth reasoning about because all the reasoning lives here.
 
@@ -339,7 +339,12 @@ var (
 
 type Controller interface {
 	Get(ctx context.Context) (State, error)
-	Set(ctx context.Context, s State) error
+
+	// Set applies the state and returns what the device actually settled on.
+	// Returning only an error would strand the helper's read-back inside the
+	// Windows layer, and the dashboard would report the requested level rather
+	// than the achieved one on any device with coarse steps.
+	Set(ctx context.Context, s State) (State, error)
 
 	// Available reports whether a session is attached to the console. It must
 	// stay cheap enough for the 3-second status poll, so it queries the session
@@ -459,23 +464,34 @@ const (
 // the copy of itself it spawns.
 const HelperFlag = "--audio-helper"
 
-// result is the single line of JSON the helper prints. Audio failures travel in
-// Error rather than in the exit code, so a helper that could not initialise COM
-// stays distinguishable from one that could not be launched at all.
+// result is a successful reading. Neither field carries omitempty: a level of 0
+// is silence, which is a real reading and must survive the round trip.
+//
+// Audio failures travel in the payload rather than in the exit code, so a
+// helper that could not initialise COM stays distinguishable from one that
+// could not be launched at all.
 type result struct {
-	Level int    `json:"level"`
-	Muted bool   `json:"muted"`
-	Error string `json:"error,omitempty"`
+	Level int  `json:"level"`
+	Muted bool `json:"muted"`
 }
 
-// EncodeResult renders the helper's one output line. When opErr is non-nil the
-// state is dropped, so a failure can never be mistaken for a reading.
+// errorResult is a failure. It carries no state at all.
+type errorResult struct {
+	Error string `json:"error"`
+}
+
+// EncodeResult renders the helper's one output line.
+//
+// A failure is encoded as an error-only object rather than an error field
+// beside a zeroed state: the wire format itself guarantees a failed read cannot
+// be mistaken for a successful reading of silence, instead of relying on the
+// decoder checking the fields in the right order.
 func EncodeResult(s State, opErr error) string {
-	r := result{Level: s.Level, Muted: s.Muted}
+	var v any = result{Level: s.Level, Muted: s.Muted}
 	if opErr != nil {
-		r = result{Error: opErr.Error()}
+		v = errorResult{Error: opErr.Error()}
 	}
-	b, err := json.Marshal(r)
+	b, err := json.Marshal(v)
 	if err != nil {
 		// An int, a bool and a string cannot fail to marshal; if that ever
 		// changes, fail in the shape the caller already parses.
@@ -490,7 +506,13 @@ func DecodeResult(line string) (State, error) {
 	if line == "" {
 		return State{}, errors.New("volume: the helper produced no output")
 	}
-	var r result
+	// Both shapes are accepted here so a failure is recognised whichever way it
+	// was encoded; the error is checked first regardless.
+	var r struct {
+		Level int    `json:"level"`
+		Muted bool   `json:"muted"`
+		Error string `json:"error"`
+	}
 	if err := json.Unmarshal([]byte(line), &r); err != nil {
 		return State{}, fmt.Errorf("volume: unreadable helper output %q: %w", line, err)
 	}
@@ -932,9 +954,8 @@ func (c systemController) Get(ctx context.Context) (State, error) {
 	return c.run(ctx, OpGet, State{})
 }
 
-func (c systemController) Set(ctx context.Context, s State) error {
-	_, err := c.run(ctx, OpSet, s)
-	return err
+func (c systemController) Set(ctx context.Context, s State) (State, error) {
+	return c.run(ctx, OpSet, s)
 }
 
 // run spawns the helper inside the logged-in user's session and reads its one
@@ -1115,11 +1136,27 @@ var iidIAudioEndpointVolume = windows.GUID{
 	Data4: [8]byte{0x97, 0x22, 0x0C, 0xF7, 0x40, 0x78, 0x22, 0x9A},
 }
 
-// call invokes vtable slot on the COM object at ptr, passing ptr as the
-// implicit `this`. It treats a negative HRESULT as an error.
-func call(ptr uintptr, slot int, args ...uintptr) error {
-	vtbl := *(**[64]uintptr)(unsafe.Pointer(ptr))
-	all := append([]uintptr{ptr}, args...)
+// call invokes vtable slot on the COM object, passing it as the implicit
+// `this`. It treats a negative HRESULT as an error.
+//
+// The object is held as unsafe.Pointer rather than uintptr because that is what
+// it is: a pointer to memory Windows allocated outside the Go heap. Holding it
+// as uintptr would require converting back, which the unsafeptr analyzer
+// rightly flags — a uintptr keeps nothing alive and the GC may move what it
+// refers to. Since vet is the only automated check that ever reaches this file,
+// keeping it clean is worth more here than anywhere else in the project.
+// The directive is load-bearing. Callers pass out-parameters as
+// uintptr(unsafe.Pointer(&x)), and the compiler only keeps such a referent
+// alive and unmoved when the conversion appears in the argument list of the
+// syscall itself. Routing them through this wrapper would otherwise leave the
+// pointed-to variables on the stack with nothing but an opaque uintptr
+// referring to them — silent corruption if the stack grows in between, which
+// vet cannot see and no test here can reach.
+//
+//go:uintptrescapes
+func call(obj unsafe.Pointer, slot int, args ...uintptr) error {
+	vtbl := *(**[64]uintptr)(obj)
+	all := append([]uintptr{uintptr(obj)}, args...)
 	hr, _, _ := syscall.SyscallN(vtbl[slot], all...)
 	if int32(hr) < 0 {
 		return fmt.Errorf("HRESULT 0x%08X", uint32(hr))
@@ -1129,17 +1166,27 @@ func call(ptr uintptr, slot int, args ...uintptr) error {
 
 // release drops a reference. IUnknown::Release is slot 2 and returns a
 // reference count rather than an HRESULT, so it does not go through call.
-func release(ptr uintptr) {
-	if ptr == 0 {
+func release(obj unsafe.Pointer) {
+	if obj == nil {
 		return
 	}
-	vtbl := *(**[64]uintptr)(unsafe.Pointer(ptr))
-	_, _, _ = syscall.SyscallN(vtbl[2], ptr)
+	vtbl := *(**[64]uintptr)(obj)
+	_, _, _ = syscall.SyscallN(vtbl[2], uintptr(obj))
 }
 
 // RunHelper executes one audio operation and returns the single line of JSON
 // the service reads from the helper's stdout. args excludes HelperFlag.
-func RunHelper(args []string) string {
+//
+// It recovers from a panic because its contract is to always produce a line:
+// LazyProc.Call panics if a DLL export cannot be resolved, and a helper that
+// dies silently tells the service nothing about why.
+func RunHelper(args []string) (line string) {
+	defer func() {
+		if v := recover(); v != nil {
+			line = EncodeResult(State{}, fmt.Errorf("volume: the helper panicked: %v", v))
+		}
+	}()
+
 	op, want, err := ParseHelperArgs(args)
 	if err != nil {
 		return EncodeResult(State{}, err)
@@ -1185,8 +1232,8 @@ func runOp(op Op, want State) (State, error) {
 
 // defaultEndpointVolume returns an IAudioEndpointVolume for the default
 // playback device. The caller releases it.
-func defaultEndpointVolume() (uintptr, error) {
-	var enumerator uintptr
+func defaultEndpointVolume() (unsafe.Pointer, error) {
+	var enumerator unsafe.Pointer
 	hr, _, _ := procCoCreateInstance.Call(
 		uintptr(unsafe.Pointer(&clsidMMDeviceEnumerator)),
 		0,
@@ -1195,18 +1242,18 @@ func defaultEndpointVolume() (uintptr, error) {
 		uintptr(unsafe.Pointer(&enumerator)),
 	)
 	if int32(hr) < 0 {
-		return 0, fmt.Errorf("volume: creating the device enumerator: HRESULT 0x%08X", uint32(hr))
+		return nil, fmt.Errorf("volume: creating the device enumerator: HRESULT 0x%08X", uint32(hr))
 	}
 	defer release(enumerator)
 
-	var device uintptr
+	var device unsafe.Pointer
 	// IMMDeviceEnumerator::GetDefaultAudioEndpoint, slot 4.
 	if err := call(enumerator, 4, eRender, eMultimedia, uintptr(unsafe.Pointer(&device))); err != nil {
-		return 0, fmt.Errorf("volume: no default playback device: %w", err)
+		return nil, fmt.Errorf("volume: no default playback device: %w", err)
 	}
 	defer release(device)
 
-	var endpoint uintptr
+	var endpoint unsafe.Pointer
 	// IMMDevice::Activate, slot 3.
 	if err := call(device, 3,
 		uintptr(unsafe.Pointer(&iidIAudioEndpointVolume)),
@@ -1214,13 +1261,13 @@ func defaultEndpointVolume() (uintptr, error) {
 		0,
 		uintptr(unsafe.Pointer(&endpoint)),
 	); err != nil {
-		return 0, fmt.Errorf("volume: activating the volume interface: %w", err)
+		return nil, fmt.Errorf("volume: activating the volume interface: %w", err)
 	}
 	return endpoint, nil
 }
 
 // stepInfo reads the device's current step and how many steps it has.
-func stepInfo(endpoint uintptr) (step, stepCount uint32, err error) {
+func stepInfo(endpoint unsafe.Pointer) (step, stepCount uint32, err error) {
 	// IAudioEndpointVolume::GetVolumeStepInfo, slot 16.
 	if err := call(endpoint, 16,
 		uintptr(unsafe.Pointer(&step)),
@@ -1228,13 +1275,19 @@ func stepInfo(endpoint uintptr) (step, stepCount uint32, err error) {
 	); err != nil {
 		return 0, 0, fmt.Errorf("volume: reading the step info: %w", err)
 	}
-	if stepCount > maxPlausibleSteps {
-		return 0, 0, fmt.Errorf("volume: the device reported %d steps, which is not plausible", stepCount)
+	// Both values are validated, not just the count: the stepping loop is
+	// bounded by the distance from step to the target, so a garbage step
+	// alongside a plausible count is what would actually spin.
+	if stepCount == 0 || stepCount > maxPlausibleSteps {
+		return 0, 0, fmt.Errorf("volume: the device reported %d volume steps, which is not usable", stepCount)
+	}
+	if step >= stepCount {
+		return 0, 0, fmt.Errorf("volume: the device reported step %d of %d, which is out of range", step, stepCount)
 	}
 	return step, stepCount, nil
 }
 
-func readState(endpoint uintptr) (State, error) {
+func readState(endpoint unsafe.Pointer) (State, error) {
 	step, stepCount, err := stepInfo(endpoint)
 	if err != nil {
 		return State{}, err
@@ -1247,7 +1300,7 @@ func readState(endpoint uintptr) (State, error) {
 	return State{Level: LevelFromStep(step, stepCount), Muted: muted != 0}, nil
 }
 
-func writeState(endpoint uintptr, want State) error {
+func writeState(endpoint unsafe.Pointer, want State) error {
 	step, stepCount, err := stepInfo(endpoint)
 	if err != nil {
 		return err
@@ -1666,16 +1719,24 @@ func (s *Server) handleVolumeSet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, want)
 }
 
-// writeVolumeError maps a controller failure onto a status code. Nobody being
-// signed in is a temporary condition rather than a fault, so it is 503 and is
-// not logged as an error — it is the expected state of a PC at the lock screen.
+// writeVolumeError maps a controller failure onto a status code.
+//
+// Nobody being signed in is a temporary, expected condition rather than a
+// fault, so it is 503, it is not logged as an error, and its message is safe to
+// show — it tells the user exactly what to do about it.
+//
+// Anything else is unclassified, and its detail stays in the log rather than
+// the response: a helper that fails to start wraps an *exec.Error whose text
+// names the executable's absolute path. This matches handleAction, which masks
+// its own 500 the same way while surfacing the classified cases it knows are
+// safe.
 func (s *Server) writeVolumeError(w http.ResponseWriter, err error, doing string) {
 	if errors.Is(err, volume.ErrNoSession) || errors.Is(err, volume.ErrUnsupported) {
 		writeJSONError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
 	s.logger.Error(doing, "error", err)
-	writeJSONError(w, http.StatusInternalServerError, err.Error())
+	writeJSONError(w, http.StatusInternalServerError, "could not reach the audio device")
 }
 ```
 
@@ -1765,14 +1826,18 @@ Expected: FAIL — the ids are absent from the template and the script.
 In `internal/web/templates/dashboard.html`, insert this section immediately after the closing `</section>` of the actions block and before the `pending` section:
 
 ```html
-    <section class="volume" id="volume-row">
-      <button type="button" id="volume-mute" class="icon" aria-pressed="false" aria-label="Mute">🔊</button>
-      <input type="range" id="volume-slider" min="0" max="100" step="1" value="0" aria-label="Volume">
+    <section class="volume disabled" id="volume-row">
+      <button type="button" id="volume-mute" class="icon" aria-pressed="false" aria-label="Mute"
+        title="Reading the volume…" disabled>🔊</button>
+      <input type="range" id="volume-slider" min="0" max="100" step="1" value="0"
+        aria-label="Volume" title="Reading the volume…" disabled>
       <span id="volume-readout" class="muted">—</span>
     </section>
 ```
 
-The row renders in its unknown state — readout an em dash, slider at 0 — because the page is served before the volume has been read. The script fills it in on load, and an em dash is honest where "0%" would assert a level nobody has checked.
+The row renders in its unknown state — readout an em dash, both controls disabled — because the page is served before the volume has been read. The script enables them once `loadVolume()` returns.
+
+Shipping them disabled is the point, not decoration. Left live, a drag during the load round trip would write a real percentage into the readout, and a mute click would send a guess rather than a toggle — both asserting a level nobody has checked, which is exactly what the em dash exists to avoid.
 
 - [ ] **Step 4: Add the styles**
 
@@ -1808,9 +1873,9 @@ Append to `internal/web/static/app.css`:
   font-variant-numeric: tabular-nums;
 }
 
-.volume[hidden],
 .volume.disabled input,
-.volume.disabled button {
+.volume.disabled button,
+.volume.disabled #volume-readout {
   opacity: 0.45;
 }
 ```
@@ -1841,6 +1906,9 @@ Putting the block before `poll()` guarantees the handles are assigned first.
       readout.textContent = "—";
       muteButton.textContent = "🔊";
       muteButton.setAttribute("aria-pressed", "false");
+      // Reset the label too, or a button that was muted keeps announcing
+      // "Unmute" to a screen reader after the state goes unknown.
+      muteButton.setAttribute("aria-label", "Mute");
       return;
     }
     slider.value = state.volume.level;

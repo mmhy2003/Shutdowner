@@ -30,6 +30,14 @@
         {{if not .Capabilities.Hibernate}}disabled title="Hibernate is not enabled on this system"{{end}}>Hibernate</button>
     </section>
 
+    <section class="volume disabled" id="volume-row">
+      <button type="button" id="volume-mute" class="icon" aria-pressed="false" aria-label="Mute"
+        title="Reading the volume…" disabled>🔊</button>
+      <input type="range" id="volume-slider" min="0" max="100" step="1" value="0"
+        aria-label="Volume" title="Reading the volume…" disabled>
+      <span id="volume-readout" class="muted">—</span>
+    </section>
+
     <section class="pending hidden" id="pending">
       <p id="pending-text"></p>
       <button id="abort" class="primary">Abort</button>

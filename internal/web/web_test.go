@@ -11,6 +11,7 @@ import (
 	"shutdowner/internal/action"
 	"shutdowner/internal/auth"
 	"shutdowner/internal/power"
+	"shutdowner/internal/volume"
 )
 
 const testPassword = "test-password"
@@ -18,6 +19,7 @@ const testPassword = "test-password"
 type testEnv struct {
 	srv     *Server
 	fake    *power.Fake
+	volume  *volume.Fake
 	actions *action.Manager
 	limiter *auth.Limiter
 	handler http.Handler
@@ -32,6 +34,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	}
 
 	fake := power.NewFake()
+	vol := volume.NewFake()
 	actions := action.New(fake)
 	limiter := auth.NewLimiter(auth.DefaultPerIPLimit, auth.DefaultGlobalLimit, auth.DefaultWindow)
 
@@ -40,6 +43,7 @@ func newTestEnv(t *testing.T) *testEnv {
 		Limiter:      limiter,
 		Actions:      actions,
 		Power:        fake,
+		Volume:       vol,
 		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 		PasswordHash: hash,
 		// A zero delay is not used here: tests need a countdown long enough to
@@ -50,7 +54,7 @@ func newTestEnv(t *testing.T) *testEnv {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	return &testEnv{srv: srv, fake: fake, actions: actions, limiter: limiter, handler: srv.Routes()}
+	return &testEnv{srv: srv, fake: fake, volume: vol, actions: actions, limiter: limiter, handler: srv.Routes()}
 }
 
 // sessionCookie logs in through the real handler and returns the resulting

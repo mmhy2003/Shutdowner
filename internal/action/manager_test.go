@@ -227,6 +227,25 @@ func TestAbortWhenIdle(t *testing.T) {
 	}
 }
 
+func TestRemainingSecondsIsRoundedUp(t *testing.T) {
+	h := newHarness(t)
+	if _, err := h.schedule(t, power.ActionShutdown, true, 45*time.Second); err != nil {
+		t.Fatalf("Schedule() error = %v", err)
+	}
+
+	// A fraction of a second always elapses between the caller computing the
+	// deadline and the manager reading the clock. Truncating would report 44
+	// the instant a 45 second countdown was scheduled.
+	h.now = h.now.Add(time.Millisecond)
+	s := h.mgr.Status()
+	if s.Pending == nil {
+		t.Fatal("Status().Pending = nil, want a pending action")
+	}
+	if s.Pending.RemainingSeconds != 45 {
+		t.Errorf("RemainingSeconds = %d just after scheduling, want 45", s.Pending.RemainingSeconds)
+	}
+}
+
 func TestRemainingSecondsCountsDown(t *testing.T) {
 	h := newHarness(t)
 	if _, err := h.schedule(t, power.ActionShutdown, true, 45*time.Second); err != nil {
