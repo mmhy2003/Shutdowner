@@ -1822,14 +1822,18 @@ Expected: FAIL — the ids are absent from the template and the script.
 In `internal/web/templates/dashboard.html`, insert this section immediately after the closing `</section>` of the actions block and before the `pending` section:
 
 ```html
-    <section class="volume" id="volume-row">
-      <button type="button" id="volume-mute" class="icon" aria-pressed="false" aria-label="Mute">🔊</button>
-      <input type="range" id="volume-slider" min="0" max="100" step="1" value="0" aria-label="Volume">
+    <section class="volume disabled" id="volume-row">
+      <button type="button" id="volume-mute" class="icon" aria-pressed="false" aria-label="Mute"
+        title="Reading the volume…" disabled>🔊</button>
+      <input type="range" id="volume-slider" min="0" max="100" step="1" value="0"
+        aria-label="Volume" title="Reading the volume…" disabled>
       <span id="volume-readout" class="muted">—</span>
     </section>
 ```
 
-The row renders in its unknown state — readout an em dash, slider at 0 — because the page is served before the volume has been read. The script fills it in on load, and an em dash is honest where "0%" would assert a level nobody has checked.
+The row renders in its unknown state — readout an em dash, both controls disabled — because the page is served before the volume has been read. The script enables them once `loadVolume()` returns.
+
+Shipping them disabled is the point, not decoration. Left live, a drag during the load round trip would write a real percentage into the readout, and a mute click would send a guess rather than a toggle — both asserting a level nobody has checked, which is exactly what the em dash exists to avoid.
 
 - [ ] **Step 4: Add the styles**
 
@@ -1865,9 +1869,9 @@ Append to `internal/web/static/app.css`:
   font-variant-numeric: tabular-nums;
 }
 
-.volume[hidden],
 .volume.disabled input,
-.volume.disabled button {
+.volume.disabled button,
+.volume.disabled #volume-readout {
   opacity: 0.45;
 }
 ```
@@ -1898,6 +1902,9 @@ Putting the block before `poll()` guarantees the handles are assigned first.
       readout.textContent = "—";
       muteButton.textContent = "🔊";
       muteButton.setAttribute("aria-pressed", "false");
+      // Reset the label too, or a button that was muted keeps announcing
+      // "Unmute" to a screen reader after the state goes unknown.
+      muteButton.setAttribute("aria-label", "Mute");
       return;
     }
     slider.value = state.volume.level;
