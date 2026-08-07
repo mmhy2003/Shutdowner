@@ -182,3 +182,37 @@ func TestOversizedVolumeBodyIsRejected(t *testing.T) {
 		t.Errorf("status = %d, want 400 — the body cap must apply here too", res.Code)
 	}
 }
+
+func TestVolumeServerErrorsDoNotLeakInternalDetail(t *testing.T) {
+	e := newTestEnv(t)
+	// The shape a failed helper spawn produces: the wrapped error names the
+	// executable's absolute path.
+	e.volume.SetGetError(errors.New(`volume: could not start the helper: exec: "C:\Program Files\Shutdowner\shutdowner.exe": file does not exist`))
+
+	res, _ := getVolume(t, e)
+	if res.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", res.Code)
+	}
+	body := res.Body.String()
+	if strings.Contains(body, "shutdowner.exe") || strings.Contains(body, "Program Files") {
+		t.Errorf("response body = %q, want no executable path", body)
+	}
+	if !strings.Contains(body, "could not reach the audio device") {
+		t.Errorf("response body = %q, want the generic message", body)
+	}
+}
+
+func TestVolumeUnavailableStillExplainsItself(t *testing.T) {
+	e := newTestEnv(t)
+	e.volume.SetGetError(volume.ErrNoSession)
+
+	res, _ := getVolume(t, e)
+	if res.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", res.Code)
+	}
+	// The 503 message is safe and actionable, so masking it would be a
+	// regression in the other direction.
+	if !strings.Contains(res.Body.String(), "signed in") {
+		t.Errorf("response body = %q, want it to say nobody is signed in", res.Body.String())
+	}
+}
