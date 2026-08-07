@@ -262,8 +262,8 @@ dialog menu { display: flex; justify-content: flex-end; gap: 0.5rem; margin: 0; 
   font-variant-numeric: tabular-nums;
 }
 
-.volume[hidden],
 .volume.disabled input,
-.volume.disabled button {
+.volume.disabled button,
+.volume.disabled #volume-readout {
   opacity: 0.45;
 }

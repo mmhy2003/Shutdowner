@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -388,8 +389,40 @@ func TestDashboardRendersTheVolumeRow(t *testing.T) {
 			t.Errorf("the dashboard does not contain %s", want)
 		}
 	}
-	// The slider must be bounded in the markup, not only in JavaScript.
-	if !strings.Contains(body, `min="0"`) || !strings.Contains(body, `max="100"`) {
-		t.Error("the slider is not bounded to 0-100 in the markup")
+	// Anchored to the slider: bare substring checks would pass on any element
+	// that happened to carry these attributes.
+	slider := regexp.MustCompile(`<input[^>]*id="volume-slider"[^>]*>`).FindString(body)
+	if slider == "" {
+		t.Fatal("the dashboard has no volume-slider input")
+	}
+	for _, attr := range []string{`min="0"`, `max="100"`, `type="range"`} {
+		if !strings.Contains(slider, attr) {
+			t.Errorf("the slider tag %q is missing %s", slider, attr)
+		}
+	}
+	if !strings.Contains(slider, "disabled") {
+		t.Error("the slider ships enabled; it must start disabled until the level has been read")
+	}
+}
+
+func TestDashboardShipsVolumeUnknown(t *testing.T) {
+	e := newTestEnv(t)
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.AddCookie(e.sessionCookie(t))
+	body := do(t, e.handler, r).Body.String()
+
+	// The page is served before anything has read the device, so it must not
+	// claim a level. The em dash is the honest placeholder.
+	readout := regexp.MustCompile(`<span[^>]*id="volume-readout"[^>]*>([^<]*)</span>`).FindStringSubmatch(body)
+	if readout == nil {
+		t.Fatal("the dashboard has no volume-readout span")
+	}
+	if strings.Contains(readout[1], "%") {
+		t.Errorf("readout renders %q, want no percentage before the level has been read", readout[1])
+	}
+
+	mute := regexp.MustCompile(`<button[^>]*id="volume-mute"[^>]*>`).FindString(body)
+	if !strings.Contains(mute, "disabled") {
+		t.Error("the mute button ships enabled; it must start disabled until the level has been read")
 	}
 }

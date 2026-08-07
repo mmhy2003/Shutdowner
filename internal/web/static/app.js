@@ -402,6 +402,7 @@
       readout.textContent = "—";
       muteButton.textContent = "🔊";
       muteButton.setAttribute("aria-pressed", "false");
+      muteButton.setAttribute("aria-label", "Mute");
       return;
     }
     slider.value = state.volume.level;
