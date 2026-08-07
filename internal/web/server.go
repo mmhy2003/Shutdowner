@@ -12,6 +12,7 @@ import (
 	"shutdowner/internal/action"
 	"shutdowner/internal/auth"
 	"shutdowner/internal/power"
+	"shutdowner/internal/volume"
 )
 
 const SessionCookieName = "shutdowner_session"
@@ -21,6 +22,7 @@ type Options struct {
 	Limiter      *auth.Limiter
 	Actions      *action.Manager
 	Power        power.Controller
+	Volume       volume.Controller
 	Logger       *slog.Logger
 	PasswordHash string
 	DelaySeconds int
@@ -31,6 +33,7 @@ type Server struct {
 	limiter      *auth.Limiter
 	actions      *action.Manager
 	power        power.Controller
+	volume       volume.Controller
 	logger       *slog.Logger
 	tmpl         *template.Template
 	static       http.Handler
@@ -40,8 +43,8 @@ type Server struct {
 }
 
 func New(o Options) (*Server, error) {
-	if o.Sessions == nil || o.Limiter == nil || o.Actions == nil || o.Power == nil || o.Logger == nil {
-		return nil, errors.New("web: Sessions, Limiter, Actions, Power and Logger are all required")
+	if o.Sessions == nil || o.Limiter == nil || o.Actions == nil || o.Power == nil || o.Volume == nil || o.Logger == nil {
+		return nil, errors.New("web: Sessions, Limiter, Actions, Power, Volume and Logger are all required")
 	}
 	if o.PasswordHash == "" {
 		return nil, errors.New("web: PasswordHash is required")
@@ -59,6 +62,7 @@ func New(o Options) (*Server, error) {
 		limiter:      o.Limiter,
 		actions:      o.Actions,
 		power:        o.Power,
+		volume:       o.Volume,
 		logger:       o.Logger,
 		tmpl:         tmpl,
 		static:       static,
@@ -82,6 +86,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/action", limitBody(maxRequestBody, s.requireSession(s.requireCSRF(s.handleAction))))
 	mux.HandleFunc("POST /api/abort", limitBody(maxRequestBody, s.requireSession(s.requireCSRF(s.handleAbort))))
 	mux.HandleFunc("POST /api/dismiss", limitBody(maxRequestBody, s.requireSession(s.requireCSRF(s.handleDismiss))))
+	mux.HandleFunc("GET /api/volume", s.requireSession(s.handleVolumeGet))
+	mux.HandleFunc("POST /api/volume", limitBody(maxRequestBody, s.requireSession(s.requireCSRF(s.handleVolumeSet))))
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /favicon.ico", handleFavicon)
 	mux.Handle("GET /static/", s.static)

@@ -21,11 +21,12 @@ type dashboardPage struct {
 
 type statusResponse struct {
 	sysinfo.Info
-	Capabilities power.Capabilities `json:"capabilities"`
-	State        action.State       `json:"state"`
-	Pending      *action.Pending    `json:"pending"`
-	Missed       *action.Missed     `json:"missed"`
-	Error        string             `json:"error"`
+	Capabilities   power.Capabilities `json:"capabilities"`
+	AudioAvailable bool               `json:"audioAvailable"`
+	State          action.State       `json:"state"`
+	Pending        *action.Pending    `json:"pending"`
+	Missed         *action.Missed     `json:"missed"`
+	Error          string             `json:"error"`
 }
 
 type actionRequest struct {
@@ -75,12 +76,13 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	st := s.actions.Status()
 	writeJSON(w, http.StatusOK, statusResponse{
-		Info:         sysinfo.Collect(),
-		Capabilities: s.capabilities(r.Context()),
-		State:        st.State,
-		Pending:      st.Pending,
-		Missed:       st.Missed,
-		Error:        st.Error,
+		Info:           sysinfo.Collect(),
+		Capabilities:   s.capabilities(r.Context()),
+		AudioAvailable: s.volume.Available(),
+		State:          st.State,
+		Pending:        st.Pending,
+		Missed:         st.Missed,
+		Error:          st.Error,
 	})
 }
 
