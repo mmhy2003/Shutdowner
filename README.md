@@ -110,6 +110,16 @@ go run ./cmd/shutdowner --hash-password    # paste the printed line into .env.de
 make run-dev
 ```
 
+## Releases & versioning
+
+The current version is in `VERSION` (`MAJOR.MINOR.BUILD`), and each version's
+notes are in `CHANGELOG.md`. Work is merged into `develop`. CI
+(`.github/workflows/ci.yml`) runs on every push to `develop` and `main`. When
+`develop` is merged into `main` with a new version in `VERSION`,
+`.github/workflows/release.yml` tags `vX.Y.Z` and publishes a GitHub Release
+with `shutdowner.exe` attached. The branching rules, how to choose the bump and
+the release steps are in [AGENTS.md](AGENTS.md).
+
 ## How it behaves
 
 - Clicking an action opens a confirm dialog, then starts a countdown you can
